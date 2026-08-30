@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Krishan Communication POS</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Dexie.js (Database) -->
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+
+    <!-- SweetAlert2 (Alerts) -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <!-- Chart.js (Charts) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- html5-qrcode (Barcode Scanner) -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <!-- JsBarcode (Barcode Generator) -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: #0f172a;
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%);
+            min-height: 100vh;
+        }
+
+        /* Light mode translucent panels */
+        html:not(.dark) body {
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 50%, #e2e8f0 100%);
+        }
+
+        /* Light mode translucent panels over background */
+        html:not(.dark) .bg-white {
+            background-color: rgba(255, 255, 255, 0.7) !important;
+        }
+
+        html:not(.dark) .bg-slate-50 {
+            background-color: rgba(248, 250, 252, 0.5) !important;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        .sidebar-item {
+            transition: all 0.2s ease;
+        }
+
+        .sidebar-item:hover,
+        .sidebar-item.active {
+            background-color: #ede9fe;
+            color: #7c3aed;
+            border-right: 3px solid #7c3aed;
+        }
+
+        /* Animation classes */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+
+        .scrollbar-hide::-webkit-scrollbar {
+            display: none;
+        }
+
+        .scrollbar-hide {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        /* Dark Mode Overrides */
+        html.dark body {
+            background-color: #0f172a;
+            background-image: linear-gradient(rgba(15, 23, 42, 0.8), rgba(15, 23, 42, 0.8)), url('bg.png');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            color: #f8fafc;
+        }
+
+        html.dark blockquote,
+        html.dark pre,
+        html.dark code {
+            background-color: rgba(30, 41, 59, 0.7) !important;
+            color: #f8fafc !important;
+        }
+
+        html.dark .bg-white {
+            background-color: rgba(30, 41, 59, 0.65) !important;
+        }
+
+        html.dark .bg-slate-50 {
+            background-color: rgba(15, 23, 42, 0.45) !important;
+        }
+
+        html.dark .bg-slate-100 {
+            background-color: #334155 !important;
+        }
+
+        html.dark .bg-slate-900 {
+            background-color: #f8fafc !important;
+            color: #0f172a !important;
+        }
+
+        html.dark .text-slate-800,
+        html.dark .text-slate-900 {
+            color: #f8fafc !important;
+        }
+
+        html.dark .text-slate-700 {
+            color: #e2e8f0 !important;
+        }
+
+        html.dark .text-slate-600 {
+            color: #cbd5e1 !important;
+        }
+
+        html.dark .text-slate-500 {
+            color: #94a3b8 !important;
+        }
+
+        html.dark .text-slate-400 {
+            color: #64748b !important;
+        }
+
+        html.dark .border-slate-100,
+        html.dark .border-gray-100 {
+            border-color: #334155 !important;
+        }
+
+        html.dark .border-slate-200 {
+            border-color: #475569 !important;
+        }
+
+        html.dark .border-slate-300 {
+            border-color: #64748b !important;
+        }
+
+        html.dark input,
+        html.dark select,
+        html.dark textarea {
+            background-color: #1e293b !important;
+            color: #f8fafc !important;
+            border-color: #475569 !important;
+        }
+
+        /* Sidebar active states and hover states overrides */
+        html.dark .sidebar-item:hover,
+        html.dark .sidebar-item.active {
+            background-color: rgba(139, 92, 246, 0.2) !important;
+            color: #a78bfa !important;
+        }
+
+        html.dark .bg-violet-50,
+        html.dark .bg-violet-100 {
+            background-color: rgba(139, 92, 246, 0.15) !important;
+            color: #c4b5fd !important;
+        }
+
+        html.dark .text-violet-600,
+        html.dark .text-violet-700 {
+            color: #a78bfa !important;
+        }
+
+        html.dark .bg-orange-50,
+        html.dark .bg-orange-100 {
+            background-color: rgba(249, 115, 22, 0.15) !important;
+            color: #fdba74 !important;
+        }
+
+        html.dark .text-orange-600,
+        html.dark .text-orange-700 {
+            color: #fb923c !important;
+        }
+
+        html.dark .bg-blue-50,
+        html.dark .bg-blue-100 {
+            background-color: rgba(59, 130, 246, 0.15) !important;
+            color: #93c5fd !important;
+        }
+
+        html.dark .text-blue-600,
+        html.dark .text-blue-700 {
+            color: #60a5fa !important;
+        }
+
+        html.dark .bg-red-50,
+        html.dark .bg-red-100 {
+            background-color: rgba(239, 68, 68, 0.15) !important;
+            color: #fca5a5 !important;
+        }
+
+        html.dark .text-red-500,
+        html.dark .text-red-600,
+        html.dark .text-red-700 {
+            color: #f87171 !important;
+        }
+
+        html.dark .bg-emerald-50,
+        html.dark .bg-emerald-100,
+        html.dark .bg-green-50,
+        html.dark .bg-green-100 {
+            background-color: rgba(16, 185, 129, 0.15) !important;
+            color: #6ee7b7 !important;
+        }
+
+        html.dark .text-emerald-600,
+        html.dark .text-emerald-700,
+        html.dark .text-green-600,
+        html.dark .text-green-700 {
+            color: #34d399 !important;
+        }
+
+        html.dark .bg-pink-100 {
+            background-color: rgba(236, 72, 153, 0.15) !important;
+            color: #f9a8d4 !important;
+        }
+
+        html.dark .text-pink-600 {
+            color: #f472b6 !important;
+        }
+
+        html.dark .bg-yellow-100 {
+            background-color: rgba(234, 179, 8, 0.15) !important;
+            color: #fde047 !important;
+        }
+
+        html.dark .text-yellow-600 {
+            color: #facc15 !important;
+        }
+
+        html.dark .bg-purple-100 {
+            background-color: rgba(168, 85, 247, 0.15) !important;
+            color: #d8b4fe !important;
+        }
+
+        html.dark .text-purple-600 {
+            color: #c084fc !important;
+        }
+
+        html.dark .bg-teal-100 {
+            background-color: rgba(20, 184, 166, 0.15) !important;
+            color: #5eead4 !important;
+        }
+
+        html.dark .text-teal-600 {
+            color: #2dd4bf !important;
+        }
+
+        html.dark .bg-cyan-100 {
+            background-color: rgba(6, 182, 212, 0.15) !important;
+            color: #67e8f9 !important;
+        }
+
+        html.dark .text-cyan-600 {
+            color: #22d3ee !important;
+        }
+
+        html.dark .bg-rose-100 {
+            background-color: rgba(225, 29, 72, 0.15) !important;
+            color: #fda4af !important;
+        }
+
+        html.dark .text-rose-600 {
+            color: #fb7185 !important;
+        }
+
+        html.dark .bg-indigo-100 {
+            background-color: rgba(99, 102, 241, 0.15) !important;
+            color: #a5b4fc !important;
+        }
+
+        html.dark .text-indigo-600 {
+            color: #818cf8 !important;
+        }
+
+        html.dark .hover\:bg-slate-50:hover {
+            background-color: #334155 !important;
+        }
+
+        html.dark .hover\:bg-slate-100:hover {
+            background-color: #475569 !important;
+        }
+
+        html.dark .hover\:bg-slate-200:hover {
+            background-color: #64748b !important;
+        }
+
+        html.dark .hover\:shadow-md:hover {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5) !important;
+            border-color: #a78bfa !important;
+        }
+
+        html.dark .hover\:border-violet-300:hover {
+            border-color: #8b5cf6 !important;
+        }
+
+        /* Modal background overlay */
+        html.dark #modal-overlay {
+            background-color: rgba(0, 0, 0, 0.7);
+        }
+
+        html.dark #modal-content {
+            background-color: #1e293b;
+            color: #f8fafc;
+        }
+
+        html.dark .divide-slate-100> :not([hidden])~ :not([hidden]) {
+            border-color: #334155 !important;
+        }
+
+        html.dark table thead {
+            background-color: #0f172a !important;
+            color: #f8fafc !important;
+        }
+
+        html.dark table td,
+        html.dark table th {
+            border-color: #334155 !important;
+        }
+
+        /* Sweet Alert Dark Mode Fix */
+        html.dark .swal2-popup {
+            background-color: #1e293b !important;
+            color: #f8fafc !important;
+            border: 1px solid #334155 !important;
+        }
+
+        html.dark .swal2-title,
+        html.dark .swal2-html-container {
+            color: #f8fafc !important;
+        }
+
+        html.dark .swal2-input,
+        html.dark .swal2-select,
+        html.dark .swal2-textarea {
+            background-color: #334155 !important;
+            color: #f8fafc !important;
+            border-color: #475569 !important;
+        }
+
+        html.dark .swal2-radio label {
+            color: #f8fafc !important;
+        }
+    </style>
+</head>
+
+<body class="text-slate-800 h-screen flex overflow-hidden relative z-0">
+
+    <!-- Hardware Accelerated Background Video -->
+    <video autoplay loop muted playsinline
+        class="absolute inset-0 w-full h-full object-cover z-[-1] opacity-90 dark:opacity-40 pointer-events-none mix-blend-overlay">
+        <!-- Add any video file named 'bg-video.mp4' to the same folder to use it -->
+        <source src="bg-video.mp4" type="video/mp4">
+    </video>
+
+    <!-- Sidebar -->
+    <aside
+        class="w-64 bg-white h-full flex flex-col shadow-xl z-20 border-r border-slate-200/40 dark:border-slate-700/50">
+        <div class="p-6 border-b border-gray-100 flex items-center justify-center">
+            <div class="flex flex-col items-center">
+                <div
+                    class="w-12 h-12 bg-violet-600 rounded-xl flex items-center justify-center text-white text-xl font-bold mb-2 shadow-lg shadow-violet-200">
+                    <i class="fa-solid fa-store"></i>
+                </div>
+                <h1 class="text-lg font-bold text-slate-800">Krishan POS</h1>
+                <p class="text-xs text-slate-500">Communication & Studio</p>
+            </div>
+        </div>
+
+        <nav class="flex-1 overflow-y-auto py-4">
+            <ul class="space-y-2">
+                <li>
+                    <a href="#" onclick="app.navigate('dashboard')" id="nav-dashboard"
+                        class="sidebar-item active flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-chart-pie w-8 text-xl text-center"></i>
+                        <span>Dashboard</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('pos')" id="nav-pos"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-cash-register w-8 text-xl text-center"></i>
+                        <span>New Sale (POS)</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('products')" id="nav-products"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-boxes-stacked w-8 text-xl text-center"></i>
+                        <span>Inventory</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('repairs')" id="nav-repairs"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-screwdriver-wrench w-8 text-xl text-center"></i>
+                        <span>Repairs</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('sales')" id="nav-sales"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-file-invoice-dollar w-8 text-xl text-center"></i>
+                        <span>Sales History</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('reports')" id="nav-reports"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-chart-line w-8 text-xl text-center"></i>
+                        <span>Reports</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('expenses')" id="nav-expenses"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-wallet w-8 text-xl text-center"></i>
+                        <span>Expenses</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('credits')" id="nav-credits"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-book-open w-8 text-xl text-center"></i>
+                        <span>Credit Book</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('utility')" id="nav-utility"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-file-invoice w-8 text-xl text-center text-emerald-600"></i>
+                        <span>Utility Bills</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('bank')" id="nav-bank"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-building-columns w-8 text-xl text-center text-blue-600"></i>
+                        <span>Bank Tracker</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" onclick="app.navigate('suppliers')" id="nav-suppliers"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-truck-field w-8 text-xl text-center text-orange-600"></i>
+                        <span>Suppliers</span>
+                    </a>
+                </li>
+                <li id="sidebar-users-item">
+                    <a href="#" onclick="app.navigate('users')" id="nav-users"
+                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
+                        <i class="fa-solid fa-users-gear w-8 text-xl text-center text-purple-600"></i>
+                        <span>User Accounts</span>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <div class="p-4 border-t border-gray-100">
+            <button onclick="app.exportData()"
+                class="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-lg text-sm font-medium transition-colors">
+                <i class="fa-solid fa-download mr-2"></i> Backup Data
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 h-full overflow-hidden flex flex-col relative bg-transparent">
+        <!-- Top Header -->
+        <header
+            class="h-16 bg-white shadow-sm flex items-center justify-between px-8 z-10 border-b border-slate-200/40 dark:border-slate-700/50">
+            <div class="flex items-center space-x-4">
+                <div class="flex flex-col leading-tight">
+                    <span id="current-date" class="text-slate-500 text-sm font-medium"></span>
+                    <span id="current-time" class="text-slate-800 text-lg font-bold"></span>
+                </div>
+                <div onclick="app.editShopProfile()" class="hidden sm:flex items-center gap-2 rounded-full bg-violet-50 hover:bg-violet-100 border border-violet-100 px-3 py-1.5 cursor-pointer transition-colors" title="Click to edit shop details">
+                    <i class="fa-solid fa-shop text-violet-600"></i>
+                    <span id="shop-profile-name" class="text-sm font-bold text-violet-700">Krishan Communication & Studio</span>
+                </div>
+            </div>
+            <div class="flex items-center space-x-3">
+                <button onclick="app.toggleDarkMode()"
+                    class="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 border border-slate-200 transition-all shadow-sm" title="Toggle Theme">
+                    <i id="theme-icon" class="fa-solid fa-moon"></i>
+                </button>
+                <button onclick="app.navigate('pos'); showCamera();"
+                    class="bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg shadow-violet-200 transition-all transform hover:scale-105 active:scale-95">
+                    <i class="fa-solid fa-plus mr-2"></i> New Sale
+                </button>
+                <button onclick="app.editShopProfile()"
+                    class="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 border border-slate-200 transition-all shadow-sm" title="Shop Details">
+                    <i class="fa-solid fa-store"></i>
+                </button>
+                <!-- User Profile & Logout Widget -->
+                <div class="flex items-center gap-2 pl-2 border-l border-slate-200 dark:border-slate-700">
+                    <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                        <div class="w-7 h-7 rounded-full bg-violet-600 text-white flex items-center justify-center text-xs font-bold" id="user-avatar-initials">
+                            A
+                        </div>
+                        <div class="flex flex-col text-left leading-none">
+                            <span id="user-display-name" class="text-xs font-bold text-slate-800 dark:text-slate-200">Admin</span>
+                            <span id="user-display-role" class="text-[10px] uppercase font-bold text-violet-600 tracking-wider">admin</span>
+                        </div>
+                    </div>
+                    <button onclick="app.logout()" class="w-9 h-9 rounded-full bg-red-50 hover:bg-red-100 text-red-600 flex items-center justify-center border border-red-200 transition-all" title="Logout">
+                        <i class="fa-solid fa-right-from-bracket text-sm"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Dynamic Content Area -->
+        <div id="app-content" class="flex-1 overflow-y-auto p-8 relative">
+            <!-- Views will be injected here via JavaScript -->
+        </div>
+    </main>
+    <div id="camera-section"
+        class="hidden fixed bottom-10 right-10 z-50 w-80 bg-white p-4 rounded-2xl shadow-2xl border border-slate-200">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-sm font-bold text-slate-700">Barcode Scanner</span>
+            <button onclick="hideCamera()" class="text-slate-400 hover:text-red-500">
+                <i class="fa-solid fa-circle-xmark"></i>
+            </button>
+        </div>
+        <div id="reader" class="rounded-lg overflow-hidden bg-slate-100"></div>
+    </div>
+    <!-- Modal Container (Generic) -->
+    <div id="modal-overlay"
+        class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div id="modal-content"
+            class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto transform transition-all scale-95 opacity-0">
+            <!-- Modal content injected here -->
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="app.js"></script>
+</body>
+
+</html>
