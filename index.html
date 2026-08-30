@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Krishan Communication POS</title>
 
     <!-- Tailwind CSS -->
@@ -36,6 +36,14 @@
             background-color: #0f172a;
             background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%);
             min-height: 100vh;
+            touch-action: manipulation;
+        }
+
+        /* Prevent auto-zoom on mobile inputs */
+        @media (max-width: 640px) {
+            input, select, textarea {
+                font-size: 16px !important;
+            }
         }
 
         /* Light mode translucent panels */
@@ -392,192 +400,234 @@
     </style>
 </head>
 
-<body class="text-slate-800 h-screen flex overflow-hidden relative z-0">
+<body class="text-slate-800 h-screen flex overflow-hidden relative z-0 antialiased selection:bg-violet-500 selection:text-white">
 
     <!-- Hardware Accelerated Background Video -->
     <video autoplay loop muted playsinline
         class="absolute inset-0 w-full h-full object-cover z-[-1] opacity-90 dark:opacity-40 pointer-events-none mix-blend-overlay">
-        <!-- Add any video file named 'bg-video.mp4' to the same folder to use it -->
         <source src="bg-video.mp4" type="video/mp4">
     </video>
 
-    <!-- Sidebar -->
-    <aside
-        class="w-64 bg-white h-full flex flex-col shadow-xl z-20 border-r border-slate-200/40 dark:border-slate-700/50">
-        <div class="p-6 border-b border-gray-100 flex items-center justify-center">
-            <div class="flex flex-col items-center">
-                <div
-                    class="w-12 h-12 bg-violet-600 rounded-xl flex items-center justify-center text-white text-xl font-bold mb-2 shadow-lg shadow-violet-200">
+    <!-- Mobile Sidebar Backdrop Overlay -->
+    <div id="sidebar-backdrop" onclick="app.toggleSidebar(false)"
+        class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden lg:hidden transition-opacity duration-300"></div>
+
+    <!-- Sidebar (Off-canvas Drawer on mobile, Fixed on desktop) -->
+    <aside id="main-sidebar"
+        class="w-72 lg:w-64 bg-white dark:bg-slate-900 h-full flex flex-col shadow-2xl lg:shadow-xl z-40 fixed lg:relative -translate-x-full lg:translate-x-0 transition-transform duration-300 ease-in-out border-r border-slate-200/50 dark:border-slate-700/50">
+        
+        <!-- Sidebar Brand Header -->
+        <div class="p-5 sm:p-6 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-11 h-11 bg-gradient-to-tr from-violet-600 to-indigo-600 rounded-2xl flex items-center justify-center text-white text-xl font-bold shadow-lg shadow-violet-500/25">
                     <i class="fa-solid fa-store"></i>
                 </div>
-                <h1 class="text-lg font-bold text-slate-800">Krishan POS</h1>
-                <p class="text-xs text-slate-500">Communication & Studio</p>
+                <div>
+                    <h1 class="text-base font-black text-slate-800 dark:text-slate-100 leading-tight">Krishan POS</h1>
+                    <p class="text-[11px] font-medium text-violet-600 dark:text-violet-400">Communication & Studio</p>
+                </div>
             </div>
+            <button onclick="app.toggleSidebar(false)" class="lg:hidden w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 flex items-center justify-center hover:text-slate-700">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
         </div>
 
-        <nav class="flex-1 overflow-y-auto py-4">
-            <ul class="space-y-2">
+        <!-- Sidebar Navigation Items -->
+        <nav class="flex-1 overflow-y-auto py-3 px-2">
+            <ul class="space-y-1">
                 <li>
-                    <a href="#" onclick="app.navigate('dashboard')" id="nav-dashboard"
-                        class="sidebar-item active flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-chart-pie w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('dashboard'); app.toggleSidebar(false);" id="nav-dashboard"
+                        class="sidebar-item active flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-chart-pie w-6 text-center text-base"></i>
                         <span>Dashboard</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('pos')" id="nav-pos"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-cash-register w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('pos'); app.toggleSidebar(false);" id="nav-pos"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-cash-register w-6 text-center text-base"></i>
                         <span>New Sale (POS)</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('products')" id="nav-products"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-boxes-stacked w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('products'); app.toggleSidebar(false);" id="nav-products"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-boxes-stacked w-6 text-center text-base"></i>
                         <span>Inventory</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('repairs')" id="nav-repairs"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-screwdriver-wrench w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('repairs'); app.toggleSidebar(false);" id="nav-repairs"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-screwdriver-wrench w-6 text-center text-base"></i>
                         <span>Repairs</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('sales')" id="nav-sales"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-file-invoice-dollar w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('sales'); app.toggleSidebar(false);" id="nav-sales"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-file-invoice-dollar w-6 text-center text-base"></i>
                         <span>Sales History</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('reports')" id="nav-reports"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-chart-line w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('reports'); app.toggleSidebar(false);" id="nav-reports"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-chart-line w-6 text-center text-base"></i>
                         <span>Reports</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('expenses')" id="nav-expenses"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-wallet w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('expenses'); app.toggleSidebar(false);" id="nav-expenses"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-wallet w-6 text-center text-base"></i>
                         <span>Expenses</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('credits')" id="nav-credits"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-book-open w-8 text-xl text-center"></i>
+                    <a href="#" onclick="app.navigate('credits'); app.toggleSidebar(false);" id="nav-credits"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-book-open w-6 text-center text-base"></i>
                         <span>Credit Book</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('utility')" id="nav-utility"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-file-invoice w-8 text-xl text-center text-emerald-600"></i>
+                    <a href="#" onclick="app.navigate('utility'); app.toggleSidebar(false);" id="nav-utility"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-file-invoice w-6 text-center text-base text-emerald-600"></i>
                         <span>Utility Bills</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('bank')" id="nav-bank"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-building-columns w-8 text-xl text-center text-blue-600"></i>
+                    <a href="#" onclick="app.navigate('bank'); app.toggleSidebar(false);" id="nav-bank"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-building-columns w-6 text-center text-base text-blue-600"></i>
                         <span>Bank Tracker</span>
                     </a>
                 </li>
                 <li>
-                    <a href="#" onclick="app.navigate('suppliers')" id="nav-suppliers"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-truck-field w-8 text-xl text-center text-orange-600"></i>
+                    <a href="#" onclick="app.navigate('suppliers'); app.toggleSidebar(false);" id="nav-suppliers"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-truck-field w-6 text-center text-base text-orange-600"></i>
                         <span>Suppliers</span>
                     </a>
                 </li>
                 <li id="sidebar-users-item">
-                    <a href="#" onclick="app.navigate('users')" id="nav-users"
-                        class="sidebar-item flex items-center px-6 py-4 text-slate-600 font-bold text-[1.05rem] transition-colors gap-3">
-                        <i class="fa-solid fa-users-gear w-8 text-xl text-center text-purple-600"></i>
+                    <a href="#" onclick="app.navigate('users'); app.toggleSidebar(false);" id="nav-users"
+                        class="sidebar-item flex items-center px-4 py-3 text-slate-600 dark:text-slate-300 font-bold text-sm rounded-xl transition-all gap-3 hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <i class="fa-solid fa-users-gear w-6 text-center text-base text-purple-600"></i>
                         <span>User Accounts</span>
                     </a>
                 </li>
             </ul>
         </nav>
 
-        <div class="p-4 border-t border-gray-100">
+        <div class="p-4 border-t border-slate-100 dark:border-slate-800">
             <button onclick="app.exportData()"
-                class="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 py-2 rounded-lg text-sm font-medium transition-colors">
-                <i class="fa-solid fa-download mr-2"></i> Backup Data
+                class="w-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 py-2.5 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-2">
+                <i class="fa-solid fa-download"></i> Backup Data
             </button>
         </div>
     </aside>
 
-    <!-- Main Content -->
+    <!-- Main Content Area -->
     <main class="flex-1 h-full overflow-hidden flex flex-col relative bg-transparent">
-        <!-- Top Header -->
+        <!-- Top Responsive Header -->
         <header
-            class="h-16 bg-white shadow-sm flex items-center justify-between px-8 z-10 border-b border-slate-200/40 dark:border-slate-700/50">
-            <div class="flex items-center space-x-4">
+            class="h-16 bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-sm flex items-center justify-between px-3 sm:px-6 z-10 border-b border-slate-200/50 dark:border-slate-700/50">
+            
+            <!-- Left: Mobile Hamburger & Date/Time -->
+            <div class="flex items-center gap-3">
+                <button onclick="app.toggleSidebar()"
+                    class="lg:hidden w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 flex items-center justify-center transition-all shadow-sm" title="Open Menu">
+                    <i class="fa-solid fa-bars text-lg"></i>
+                </button>
                 <div class="flex flex-col leading-tight">
-                    <span id="current-date" class="text-slate-500 text-sm font-medium"></span>
-                    <span id="current-time" class="text-slate-800 text-lg font-bold"></span>
+                    <span id="current-date" class="text-slate-500 dark:text-slate-400 text-[11px] font-medium hidden sm:inline"></span>
+                    <span id="current-time" class="text-slate-800 dark:text-slate-200 text-sm sm:text-base font-bold"></span>
                 </div>
-                <div onclick="app.editShopProfile()" class="hidden sm:flex items-center gap-2 rounded-full bg-violet-50 hover:bg-violet-100 border border-violet-100 px-3 py-1.5 cursor-pointer transition-colors" title="Click to edit shop details">
-                    <i class="fa-solid fa-shop text-violet-600"></i>
-                    <span id="shop-profile-name" class="text-sm font-bold text-violet-700">Krishan Communication & Studio</span>
+                <div onclick="app.editShopProfile()" class="hidden md:flex items-center gap-2 rounded-full bg-violet-50 dark:bg-violet-900/20 hover:bg-violet-100 border border-violet-100 dark:border-violet-800/40 px-3 py-1 cursor-pointer transition-colors" title="Click to edit shop details">
+                    <i class="fa-solid fa-shop text-violet-600 text-xs"></i>
+                    <span id="shop-profile-name" class="text-xs font-bold text-violet-700 dark:text-violet-300">Krishan Communication</span>
                 </div>
             </div>
-            <div class="flex items-center space-x-3">
+
+            <!-- Right Header Actions -->
+            <div class="flex items-center gap-2 sm:gap-3">
                 <button onclick="app.toggleDarkMode()"
-                    class="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 border border-slate-200 transition-all shadow-sm" title="Toggle Theme">
-                    <i id="theme-icon" class="fa-solid fa-moon"></i>
+                    class="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-600 dark:text-slate-300 flex items-center justify-center border border-slate-200/60 dark:border-slate-700 transition-all shadow-sm" title="Toggle Theme">
+                    <i id="theme-icon" class="fa-solid fa-moon text-sm"></i>
                 </button>
+
                 <button onclick="app.navigate('pos'); showCamera();"
-                    class="bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg shadow-violet-200 transition-all transform hover:scale-105 active:scale-95">
-                    <i class="fa-solid fa-plus mr-2"></i> New Sale
+                    class="hidden sm:inline-flex items-center gap-1.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold shadow-md shadow-violet-500/20 transition-all active:scale-95">
+                    <i class="fa-solid fa-plus"></i> New Sale
                 </button>
-                <button onclick="app.editShopProfile()"
-                    class="w-10 h-10 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-600 border border-slate-200 transition-all shadow-sm" title="Shop Details">
-                    <i class="fa-solid fa-store"></i>
-                </button>
+
                 <!-- User Profile & Logout Widget -->
-                <div class="flex items-center gap-2 pl-2 border-l border-slate-200 dark:border-slate-700">
-                    <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-                        <div class="w-7 h-7 rounded-full bg-violet-600 text-white flex items-center justify-center text-xs font-bold" id="user-avatar-initials">
+                <div class="flex items-center gap-1.5 sm:gap-2 pl-1 sm:pl-2 border-l border-slate-200 dark:border-slate-700">
+                    <div class="flex items-center gap-2 px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700">
+                        <div class="w-6 h-6 rounded-full bg-violet-600 text-white flex items-center justify-center text-[10px] font-bold" id="user-avatar-initials">
                             A
                         </div>
-                        <div class="flex flex-col text-left leading-none">
-                            <span id="user-display-name" class="text-xs font-bold text-slate-800 dark:text-slate-200">Admin</span>
-                            <span id="user-display-role" class="text-[10px] uppercase font-bold text-violet-600 tracking-wider">admin</span>
-                        </div>
+                        <span id="user-display-name" class="text-xs font-bold text-slate-800 dark:text-slate-200 max-w-[80px] truncate hidden sm:inline">Admin</span>
                     </div>
-                    <button onclick="app.logout()" class="w-9 h-9 rounded-full bg-red-50 hover:bg-red-100 text-red-600 flex items-center justify-center border border-red-200 transition-all" title="Logout">
-                        <i class="fa-solid fa-right-from-bracket text-sm"></i>
+                    <button onclick="app.logout()" class="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-red-50 dark:bg-red-900/30 hover:bg-red-100 text-red-600 dark:text-red-400 flex items-center justify-center border border-red-200/60 dark:border-red-800/40 transition-all" title="Logout">
+                        <i class="fa-solid fa-right-from-bracket text-xs sm:text-sm"></i>
                     </button>
                 </div>
             </div>
         </header>
 
-        <!-- Dynamic Content Area -->
-        <div id="app-content" class="flex-1 overflow-y-auto p-8 relative">
+        <!-- Dynamic Content Area (with responsive padding and mobile bottom margin) -->
+        <div id="app-content" class="flex-1 overflow-y-auto p-3 sm:p-6 lg:p-8 pb-20 lg:pb-8 relative">
             <!-- Views will be injected here via JavaScript -->
         </div>
+
+        <!-- Mobile Bottom Quick Navigation Bar (Shown only on small screens) -->
+        <nav class="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-t border-slate-200 dark:border-slate-800 py-1.5 px-3 flex items-center justify-around shadow-lg">
+            <button onclick="app.navigate('dashboard')" class="flex flex-col items-center gap-1 text-slate-500 dark:text-slate-400 hover:text-violet-600 focus:text-violet-600 py-1 px-2">
+                <i class="fa-solid fa-chart-pie text-lg"></i>
+                <span class="text-[10px] font-bold">Home</span>
+            </button>
+            <button onclick="app.navigate('pos')" class="flex flex-col items-center gap-1 -mt-5 bg-gradient-to-tr from-violet-600 to-indigo-600 text-white p-3 rounded-2xl shadow-lg shadow-violet-500/30 active:scale-95 transition-all">
+                <i class="fa-solid fa-cash-register text-lg"></i>
+                <span class="text-[10px] font-black uppercase">POS</span>
+            </button>
+            <button onclick="app.navigate('products')" class="flex flex-col items-center gap-1 text-slate-500 dark:text-slate-400 hover:text-violet-600 focus:text-violet-600 py-1 px-2">
+                <i class="fa-solid fa-boxes-stacked text-lg"></i>
+                <span class="text-[10px] font-bold">Items</span>
+            </button>
+            <button onclick="app.navigate('repairs')" class="flex flex-col items-center gap-1 text-slate-500 dark:text-slate-400 hover:text-violet-600 focus:text-violet-600 py-1 px-2">
+                <i class="fa-solid fa-screwdriver-wrench text-lg"></i>
+                <span class="text-[10px] font-bold">Repairs</span>
+            </button>
+            <button onclick="app.toggleSidebar(true)" class="flex flex-col items-center gap-1 text-slate-500 dark:text-slate-400 hover:text-violet-600 focus:text-violet-600 py-1 px-2">
+                <i class="fa-solid fa-ellipsis text-lg"></i>
+                <span class="text-[10px] font-bold">More</span>
+            </button>
+        </nav>
     </main>
+
+    <!-- Barcode Scanner Modal for Mobile/Desktop Camera -->
     <div id="camera-section"
-        class="hidden fixed bottom-10 right-10 z-50 w-80 bg-white p-4 rounded-2xl shadow-2xl border border-slate-200">
+        class="hidden fixed inset-x-4 top-20 sm:inset-auto sm:bottom-10 sm:right-10 z-50 sm:w-80 bg-white dark:bg-slate-800 p-4 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-700">
         <div class="flex items-center justify-between mb-2">
-            <span class="text-sm font-bold text-slate-700">Barcode Scanner</span>
-            <button onclick="hideCamera()" class="text-slate-400 hover:text-red-500">
-                <i class="fa-solid fa-circle-xmark"></i>
+            <span class="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                <i class="fa-solid fa-camera text-violet-600"></i> Barcode Scanner
+            </span>
+            <button onclick="hideCamera()" class="w-7 h-7 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 hover:text-red-500 flex items-center justify-center">
+                <i class="fa-solid fa-xmark text-sm"></i>
             </button>
         </div>
-        <div id="reader" class="rounded-lg overflow-hidden bg-slate-100"></div>
+        <div id="reader" class="rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-900 aspect-square"></div>
     </div>
-    <!-- Modal Container (Generic) -->
+
+    <!-- Generic Modal Container (Responsive) -->
     <div id="modal-overlay"
-        class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-3 sm:p-4">
         <div id="modal-content"
-            class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto transform transition-all scale-95 opacity-0">
+            class="bg-white dark:bg-slate-800 rounded-3xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto transform transition-all scale-95 opacity-0 border border-slate-200 dark:border-slate-700">
             <!-- Modal content injected here -->
         </div>
     </div>

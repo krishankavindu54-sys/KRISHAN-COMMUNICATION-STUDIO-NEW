@@ -96,6 +96,23 @@ const app = {
         });
     },
 
+    toggleSidebar: (forceState) => {
+        const sidebar = document.getElementById('main-sidebar');
+        const backdrop = document.getElementById('sidebar-backdrop');
+        if (!sidebar) return;
+        
+        const isHidden = sidebar.classList.contains('-translate-x-full');
+        const shouldShow = forceState !== undefined ? forceState : isHidden;
+
+        if (shouldShow) {
+            sidebar.classList.remove('-translate-x-full');
+            if (backdrop) backdrop.classList.remove('hidden');
+        } else {
+            sidebar.classList.add('-translate-x-full');
+            if (backdrop) backdrop.classList.add('hidden');
+        }
+    },
+
     showLoginOverlay: () => {
         let overlay = document.getElementById('pos-login-overlay');
         if (!overlay) {

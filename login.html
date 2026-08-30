@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Krishan POS - Login</title>
 
     <!-- Tailwind CSS -->
@@ -23,6 +23,7 @@
             font-family: 'Outfit', sans-serif;
             background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #311042 100%);
             min-height: 100vh;
+            touch-action: manipulation;
         }
 
         .glass-card {
@@ -44,18 +45,28 @@
         .floating-badge {
             animation: floatSlow 4s ease-in-out infinite;
         }
+
+        /* Prevent auto-zoom on iOS safari input focus */
+        input, select, textarea, button {
+            font-size: 16px !important;
+        }
+        @media (min-width: 640px) {
+            input, select, textarea, button {
+                font-size: 14px !important;
+            }
+        }
     </style>
 </head>
 
-<body class="flex items-center justify-center p-4 min-h-screen relative overflow-hidden">
+<body class="flex items-center justify-center p-3 sm:p-6 min-h-screen relative overflow-x-hidden antialiased">
 
     <!-- Decorative background blobs -->
-    <div class="absolute -top-32 -left-32 w-96 h-96 bg-violet-600/30 rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute -bottom-32 -right-32 w-96 h-96 bg-fuchsia-600/20 rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute -top-32 -left-32 w-72 sm:w-96 h-72 sm:h-96 bg-violet-600/30 rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute -bottom-32 -right-32 w-72 sm:w-96 h-72 sm:h-96 bg-fuchsia-600/20 rounded-full blur-3xl pointer-events-none"></div>
 
-    <div class="w-full max-w-md relative z-10">
+    <div class="w-full max-w-md relative z-10 my-auto">
         <!-- Main Login Card -->
-        <div class="glass-card rounded-3xl p-8 sm:p-10 glow-effect">
+        <div class="glass-card rounded-3xl p-6 sm:p-10 glow-effect">
             
             <!-- Branding Header -->
             <div class="text-center mb-8">
