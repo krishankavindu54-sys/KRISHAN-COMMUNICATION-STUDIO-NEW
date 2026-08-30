@@ -27,6 +27,9 @@
     <!-- html5-qrcode (Barcode Scanner) -->
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
 
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏪</text></svg>">
+
     <!-- JsBarcode (Barcode Generator) -->
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 
@@ -53,11 +56,11 @@
 
         /* Light mode translucent panels over background */
         html:not(.dark) .bg-white {
-            background-color: rgba(255, 255, 255, 0.7) !important;
+            background-color: rgba(255, 255, 255, 0.85) !important;
         }
 
         html:not(.dark) .bg-slate-50 {
-            background-color: rgba(248, 250, 252, 0.5) !important;
+            background-color: rgba(248, 250, 252, 0.7) !important;
         }
 
         /* Custom Scrollbar */
@@ -86,7 +89,11 @@
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
         }
 
-        .sidebar-item {
+        /* Dark Mode Global Styles */
+        html.dark body {
+            background: linear-gradient(135deg, #020617 0%, #0f172a 50%, #1e1b4b 100%) !important;
+            color: #f8fafc !important;
+        }.sidebar-item {
             transition: all 0.2s ease;
         }
 
@@ -401,12 +408,6 @@
 </head>
 
 <body class="text-slate-800 h-screen flex overflow-hidden relative z-0 antialiased selection:bg-violet-500 selection:text-white">
-
-    <!-- Hardware Accelerated Background Video -->
-    <video autoplay loop muted playsinline
-        class="absolute inset-0 w-full h-full object-cover z-[-1] opacity-90 dark:opacity-40 pointer-events-none mix-blend-overlay">
-        <source src="bg-video.mp4" type="video/mp4">
-    </video>
 
     <!-- Mobile Sidebar Backdrop Overlay -->
     <div id="sidebar-backdrop" onclick="app.toggleSidebar(false)"
