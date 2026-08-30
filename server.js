@@ -350,10 +350,6 @@ app.get('/login', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    const user = verifyToken(req);
-    if (!user) {
-        return res.redirect('/login');
-    }
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 

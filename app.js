@@ -77,15 +77,10 @@ const app = {
         setInterval(app.updateDateTime, 1000);
         app.initTheme();
 
-        // 1. Verify backend authentication
+        // 1. Verify authentication
         const isAuth = await app.checkAuth();
         if (!isAuth) {
-            const isGitHub = window.location.hostname.endsWith('github.io') || window.location.pathname.endsWith('.html');
-            if (isGitHub || window.location.protocol === 'file:') {
-                window.location.href = 'login.html';
-            } else {
-                window.location.href = '/login';
-            }
+            app.showLoginOverlay();
             return;
         }
 
@@ -101,6 +96,161 @@ const app = {
         });
     },
 
+    showLoginOverlay: () => {
+        let overlay = document.getElementById('pos-login-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'pos-login-overlay';
+            overlay.className = 'fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/90 backdrop-blur-md';
+            overlay.innerHTML = `
+                <div class="w-full max-w-md bg-white dark:bg-slate-800 rounded-3xl p-8 sm:p-10 shadow-2xl border border-slate-200 dark:border-slate-700">
+                    <div class="text-center mb-6">
+                        <div class="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-tr from-violet-600 to-indigo-600 text-white flex items-center justify-center text-2xl shadow-lg shadow-violet-500/30 mb-3">
+                            <i class="fa-solid fa-cash-register"></i>
+                        </div>
+                        <h2 class="text-2xl font-black text-slate-900 dark:text-white">Krishan POS</h2>
+                        <p class="text-xs text-violet-600 dark:text-violet-400 font-semibold mt-0.5">Communication & Studio</p>
+                        <p class="text-xs text-slate-400 mt-1">Sign in to access the Point of Sale System</p>
+                    </div>
+
+                    <form id="overlay-login-form" class="space-y-4" onsubmit="app.handleOverlayLogin(event)">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1.5">
+                                <i class="fa-solid fa-user text-violet-600 mr-1"></i> Username
+                            </label>
+                            <input type="text" id="overlay-username" required autocomplete="username"
+                                class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-xl text-slate-800 dark:text-white text-sm font-medium focus:ring-2 focus:ring-violet-500 outline-none transition-all"
+                                placeholder="Enter username (e.g. admin)">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1.5">
+                                <i class="fa-solid fa-lock text-violet-600 mr-1"></i> Password
+                            </label>
+                            <input type="password" id="overlay-password" required autocomplete="current-password"
+                                class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-xl text-slate-800 dark:text-white text-sm font-medium focus:ring-2 focus:ring-violet-500 outline-none transition-all"
+                                placeholder="••••••••">
+                        </div>
+
+                        <div id="overlay-error-banner" class="hidden p-3 rounded-xl bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-300 text-xs font-semibold flex items-center gap-2">
+                            <i class="fa-solid fa-circle-exclamation"></i>
+                            <span id="overlay-error-text">Invalid credentials</span>
+                        </div>
+
+                        <button type="submit" id="overlay-login-btn"
+                            class="w-full py-3.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-violet-500/25 transition-all active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
+                            <span id="overlay-btn-text">Sign In to POS</span>
+                            <i class="fa-solid fa-arrow-right"></i>
+                        </button>
+                    </form>
+
+                    <div class="mt-5 pt-4 border-t border-slate-100 dark:border-slate-700 text-center">
+                        <button type="button" onclick="app.fillOverlayAdmin()"
+                            class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-violet-50 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 hover:bg-violet-100 transition-colors border border-violet-100 dark:border-violet-800">
+                            ✨ Quick Login: admin / admin123
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+        }
+        overlay.classList.remove('hidden');
+        setTimeout(() => {
+            const userInp = document.getElementById('overlay-username');
+            if (userInp) userInp.focus();
+        }, 100);
+    },
+
+    fillOverlayAdmin: () => {
+        const u = document.getElementById('overlay-username');
+        const p = document.getElementById('overlay-password');
+        if (u) u.value = 'admin';
+        if (p) p.value = 'admin123';
+        const form = document.getElementById('overlay-login-form');
+        if (form) form.dispatchEvent(new Event('submit'));
+    },
+
+    handleOverlayLogin: async (e) => {
+        if (e) e.preventDefault();
+        const u = document.getElementById('overlay-username').value.trim();
+        const p = document.getElementById('overlay-password').value.trim();
+        const btn = document.getElementById('overlay-login-btn');
+        const btnText = document.getElementById('overlay-btn-text');
+        const errBanner = document.getElementById('overlay-error-banner');
+        const errText = document.getElementById('overlay-error-text');
+
+        if (!u || !p) return;
+
+        errBanner.classList.add('hidden');
+        btn.disabled = true;
+        btnText.textContent = 'Signing in...';
+
+        let user = null;
+        try {
+            // 1. Try backend authentication
+            try {
+                const res = await fetch(app.getApiUrl('/api/auth/login'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username: u, password: p })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.success) {
+                    user = data.user;
+                }
+            } catch (err) {
+                // Backend offline
+            }
+
+            // 2. Fallback offline authentication
+            if (!user) {
+                if (u.toLowerCase() === 'admin' && p === 'admin123') {
+                    user = { id: 1, username: 'admin', role: 'admin', name: 'Administrator' };
+                } else if (u.toLowerCase() === 'cashier' && p === 'cashier123') {
+                    user = { id: 2, username: 'cashier', role: 'cashier', name: 'Cashier' };
+                } else {
+                    const localUsers = JSON.parse(localStorage.getItem('pos_registered_users') || '[]');
+                    const found = localUsers.find(x => x.username.toLowerCase() === u.toLowerCase() && x.password === p);
+                    if (found) {
+                        user = { id: found.id, username: found.username, role: found.role || 'cashier', name: found.name };
+                    }
+                }
+            }
+
+            if (!user) {
+                throw new Error('Invalid username or password.');
+            }
+
+            app.currentUser = user;
+            localStorage.setItem('pos_current_user', JSON.stringify(user));
+            app.updateUserHeader();
+
+            const overlay = document.getElementById('pos-login-overlay');
+            if (overlay) overlay.classList.add('hidden');
+
+            await app.syncWithBackend();
+            app.updateShopProfileHeader();
+            app.navigate('dashboard');
+
+            Swal.fire({
+                toast: true,
+                position: 'top-end',
+                icon: 'success',
+                title: `Logged in as ${user.name || user.username}`,
+                timer: 1500,
+                showConfirmButton: false
+            });
+
+        } catch (err) {
+            errText.textContent = err.message || 'Login failed';
+            errBanner.classList.remove('hidden');
+        } finally {
+            btn.disabled = false;
+            btnText.textContent = 'Sign In to POS';
+        }
+    },
+
     checkAuth: async () => {
         try {
             const res = await fetch(app.getApiUrl('/api/auth/me'), { credentials: 'include' });
@@ -114,7 +264,7 @@ const app = {
                 }
             }
         } catch (e) {
-            console.warn('Backend auth check skipped/failed (offline/static mode):', e);
+            // Offline / static mode
         }
 
         const saved = localStorage.getItem('pos_current_user');
@@ -167,12 +317,8 @@ const app = {
                 await fetch(app.getApiUrl('/api/auth/logout'), { method: 'POST', credentials: 'include' });
             } catch (e) {}
             localStorage.removeItem('pos_current_user');
-            const isGitHub = window.location.hostname.endsWith('github.io') || window.location.pathname.endsWith('.html');
-            if (isGitHub || window.location.protocol === 'file:') {
-                window.location.href = 'login.html';
-            } else {
-                window.location.href = '/login';
-            }
+            app.currentUser = null;
+            app.showLoginOverlay();
         }
     },
 

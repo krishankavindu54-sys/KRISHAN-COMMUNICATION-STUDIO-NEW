@@ -256,13 +256,8 @@
                 });
 
                 setTimeout(() => {
-                    const isGitHub = window.location.hostname.endsWith('github.io') || window.location.pathname.endsWith('.html');
-                    if (isGitHub || window.location.protocol === 'file:') {
-                        window.location.href = 'index.html';
-                    } else {
-                        window.location.href = '/';
-                    }
-                }, 800);
+                    window.location.href = 'index.html';
+                }, 600);
 
             } catch (err) {
                 let msg = err.message || 'Login failed';
@@ -281,21 +276,13 @@
                 const res = await fetch(`${apiBase}/api/auth/me`, { credentials: 'include' });
                 const data = await res.json();
                 if (res.ok && data.authenticated) {
-                    const isGitHub = window.location.hostname.endsWith('github.io') || window.location.pathname.endsWith('.html');
-                    if (isGitHub || window.location.protocol === 'file:') {
-                        window.location.href = 'index.html';
-                    } else {
-                        window.location.href = '/';
-                    }
+                    window.location.href = 'index.html';
                 }
             } catch (e) {
                 // Check local storage session
                 const saved = localStorage.getItem('pos_current_user');
                 if (saved) {
-                    const isGitHub = window.location.hostname.endsWith('github.io') || window.location.pathname.endsWith('.html');
-                    if (isGitHub || window.location.protocol === 'file:') {
-                        window.location.href = 'index.html';
-                    }
+                    window.location.href = 'index.html';
                 }
             }
         })();
