@@ -371,22 +371,26 @@ function getLocalIPAddress() {
 
 const localIP = getLocalIPAddress();
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`=========================================`);
-    console.log(`🚀 Krishan POS Server Running!`);
-    console.log(`💻 This Computer:  http://localhost:${PORT} or http://krishanpos.local`);
-    console.log(`📱 Other Devices:  http://${localIP}:${PORT}`);
-    console.log(`🔑 Default Admin:  admin / admin123`);
-    console.log(`=========================================`);
-});
+module.exports = app;
 
-// Also attempt to listen on standard HTTP Port 80 so user can use http://krishanpos.local without specifying :3000
-if (Number(PORT) !== 80) {
-    const http = require('http');
-    const server80 = http.createServer(app);
-    server80.listen(80, '0.0.0.0', () => {
-        console.log(`✨ Direct Port 80 active (Other devices can also visit http://${localIP})`);
-    }).on('error', () => {
-        // Port 80 not available, port 3000 remains active
+if (!process.env.VERCEL) {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+        console.log(`=========================================`);
+        console.log(`🚀 Krishan POS Server Running!`);
+        console.log(`💻 This Computer:  http://localhost:${PORT} or http://krishanpos.local`);
+        console.log(`📱 Other Devices:  http://${localIP}:${PORT}`);
+        console.log(`🔑 Default Admin:  admin / admin123`);
+        console.log(`=========================================`);
     });
+
+    // Also attempt to listen on standard HTTP Port 80 so user can use http://krishanpos.local without specifying :3000
+    if (Number(PORT) !== 80) {
+        const http = require('http');
+        const server80 = http.createServer(app);
+        server80.listen(80, '0.0.0.0', () => {
+            console.log(`✨ Direct Port 80 active (Other devices can also visit http://${localIP})`);
+        }).on('error', () => {
+            // Port 80 not available, port 3000 remains active
+        });
+    }
 }

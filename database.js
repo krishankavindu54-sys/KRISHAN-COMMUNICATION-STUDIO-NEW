@@ -2,10 +2,23 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
-// Ensure data directory exists
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+// Serverless / Read-Only File System Detection (Vercel, AWS Lambda, Cloud)
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
+
+let DATA_DIR;
+if (isServerless) {
+    DATA_DIR = path.join('/tmp', 'data');
+} else {
+    DATA_DIR = path.join(__dirname, 'data');
+}
+
+try {
+    if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+} catch (err) {
+    console.warn('Could not create standard DATA_DIR, falling back to /tmp:', err.message);
+    DATA_DIR = '/tmp';
 }
 
 const DB_PATH = path.join(DATA_DIR, 'pos.sqlite');
@@ -15,7 +28,6 @@ try {
     const { DatabaseSync } = require('node:sqlite');
     db = new DatabaseSync(DB_PATH);
 } catch (err) {
-    console.warn('node:sqlite not available, falling back to embedded JSON SQLite emulator');
     // Fallback in case of environment limitation
 }
 
@@ -39,19 +51,23 @@ class JsonDatabase {
     }
 
     load() {
-        if (fs.existsSync(this.filePath)) {
-            try {
+        try {
+            if (fs.existsSync(this.filePath)) {
                 this.data = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-            } catch (e) {
-                console.error('Error loading json database:', e);
+            } else {
+                this.save();
             }
-        } else {
-            this.save();
+        } catch (e) {
+            console.error('Error loading json database:', e);
         }
     }
 
     save() {
-        fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), 'utf8');
+        try {
+            fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), 'utf8');
+        } catch (e) {
+            console.error('Error saving json database:', e);
+        }
     }
 }
 
