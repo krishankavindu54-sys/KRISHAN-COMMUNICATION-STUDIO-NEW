@@ -73,22 +73,33 @@ const app = {
     },
 
     init: async () => {
-        app.updateDateTime();
-        setInterval(app.updateDateTime, 1000);
-        app.initTheme();
+        try {
+            app.updateDateTime();
+            setInterval(app.updateDateTime, 1000);
+            app.initTheme();
 
-        // 1. Verify authentication
-        const isAuth = await app.checkAuth();
-        if (!isAuth) {
-            app.showLoginOverlay();
-            return;
+            // 1. Verify authentication
+            const isAuth = await app.checkAuth();
+            if (!isAuth) {
+                app.showLoginOverlay();
+                return;
+            }
+
+            // 2. Sync with SQLite backend database (if available)
+            try {
+                await app.syncWithBackend();
+            } catch (syncErr) {
+                console.warn('Backend sync skipped/failed:', syncErr);
+            }
+
+            app.updateShopProfileHeader();
+            app.navigate('dashboard');
+        } catch (e) {
+            console.error('App init error:', e);
+            try {
+                app.navigate('dashboard');
+            } catch (err) {}
         }
-
-        // 2. Sync with SQLite backend database
-        await app.syncWithBackend();
-
-        app.updateShopProfileHeader();
-        app.navigate('dashboard');
 
         // Global Error Handler
         window.addEventListener('unhandledrejection', (event) => {
@@ -3534,8 +3545,12 @@ if (formValues) {
     },
 };
 
-// Start the app
-document.addEventListener('DOMContentLoaded', app.init);
+// Start the app immediately or on DOM ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => app.init());
+} else {
+    app.init();
+}
 let html5QrCode;
 
 // කැමරාව පෙන්වීමට
