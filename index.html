@@ -33,6 +33,14 @@
     <!-- JsBarcode (Barcode Generator) -->
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 
+    <!-- Socket.io (Realtime Sync Engine) -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        if (typeof io === 'undefined') {
+            document.write('<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"><\/script>');
+        }
+    </script>
+
     <style>
         body {
             font-family: 'Outfit', sans-serif;
@@ -555,6 +563,22 @@
 
             <!-- Right Header Actions -->
             <div class="flex items-center gap-2 sm:gap-3">
+                <!-- Realtime Live Sync Status Badge -->
+                <div id="realtime-sync-widget" onclick="app.showSyncStatusModal()" class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm" title="Realtime Live Sync: Connected. Click to view details.">
+                    <span class="relative flex h-2 w-2">
+                        <span id="sync-pulse" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span id="sync-dot" class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span id="sync-status-text" class="hidden sm:inline">Live</span>
+                    <span id="sync-device-badge" class="px-1.5 py-0.2 rounded-full bg-emerald-200/60 dark:bg-emerald-800/60 text-[10px]" title="Connected Devices">1</span>
+                </div>
+
+                <!-- Manual Sync Action Button -->
+                <button id="manual-sync-btn" onclick="app.triggerManualSync()"
+                    class="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-violet-50 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 hover:text-violet-600 flex items-center justify-center border border-slate-200/60 dark:border-slate-700 transition-all shadow-sm" title="Sync All Data with Server">
+                    <i id="manual-sync-icon" class="fa-solid fa-arrows-rotate text-sm"></i>
+                </button>
+
                 <button onclick="app.toggleDarkMode()"
                     class="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-600 dark:text-slate-300 flex items-center justify-center border border-slate-200/60 dark:border-slate-700 transition-all shadow-sm" title="Toggle Theme">
                     <i id="theme-icon" class="fa-solid fa-moon text-sm"></i>

@@ -66,10 +66,497 @@ const app = {
     },
 
     currentUser: null,
-    apiSync: {
-        post: (url, data) => fetch(app.getApiUrl(url), { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(data) }).catch(() => {}),
-        put: (url, data) => fetch(app.getApiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(data) }).catch(() => {}),
-        delete: (url) => fetch(app.getApiUrl(url), { method: 'DELETE', credentials: 'include' }).catch(() => {})
+
+    // Realtime Multi-Device Sync Engine (Socket.io + IndexedDB)
+    realtime: {
+        socket: null,
+        status: 'connecting', // 'connected' | 'syncing' | 'offline'
+        deviceCount: 1,
+        lastSyncTime: null,
+        pendingQueue: JSON.parse(localStorage.getItem('pos_offline_queue') || '[]'),
+
+        init: () => {
+            try {
+                if (typeof io === 'undefined') {
+                    console.warn('Socket.io library not detected. Running in offline/local mode.');
+                    app.realtime.setStatus('offline');
+                    return;
+                }
+
+                const socketUrl = (window.location.protocol === 'file:' || (window.location.port !== '3000' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')))
+                    ? 'http://localhost:3000'
+                    : window.location.origin;
+
+                const socket = io(socketUrl, {
+                    reconnection: true,
+                    reconnectionAttempts: Infinity,
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    timeout: 20000,
+                    transports: ['websocket', 'polling']
+                });
+
+                app.realtime.socket = socket;
+
+                socket.on('connect', () => {
+                    console.log('⚡ [Realtime] Connected to POS WebSocket, Socket ID:', socket.id);
+                    app.realtime.setStatus('connected');
+                    app.realtime.flushOfflineQueue();
+                    app.syncWithBackend(false);
+                });
+
+                socket.on('disconnect', (reason) => {
+                    console.warn('🔌 [Realtime] Disconnected from POS server:', reason);
+                    app.realtime.setStatus('offline');
+                });
+
+                socket.on('connect_error', (err) => {
+                    console.warn('⚠️ [Realtime] WebSocket connection error:', err?.message);
+                    app.realtime.setStatus('offline');
+                });
+
+                socket.on('sync:welcome', (data) => {
+                    if (data && data.deviceCount !== undefined) {
+                        app.realtime.deviceCount = data.deviceCount;
+                        app.realtime.updateStatusUI();
+                    }
+                });
+
+                socket.on('sync:device_count', (data) => {
+                    if (data && data.count !== undefined) {
+                        app.realtime.deviceCount = data.count;
+                        app.realtime.updateStatusUI();
+                    }
+                });
+
+                socket.on('sync:event', (event) => {
+                    app.realtime.handleIncomingEvent(event);
+                });
+
+            } catch (err) {
+                console.error('Socket init error:', err);
+                app.realtime.setStatus('offline');
+            }
+        },
+
+        setStatus: (status) => {
+            app.realtime.status = status;
+            app.realtime.updateStatusUI();
+        },
+
+        updateStatusUI: () => {
+            const widget = document.getElementById('realtime-sync-widget');
+            const pulse = document.getElementById('sync-pulse');
+            const dot = document.getElementById('sync-dot');
+            const text = document.getElementById('sync-status-text');
+            const badge = document.getElementById('sync-device-badge');
+
+            if (!widget) return;
+
+            const count = app.realtime.deviceCount || 1;
+
+            if (app.realtime.status === 'connected') {
+                widget.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm';
+                if (pulse) pulse.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
+                if (dot) dot.className = 'relative inline-flex rounded-full h-2 w-2 bg-emerald-500';
+                if (text) text.textContent = 'Live';
+                if (badge) {
+                    badge.textContent = count > 1 ? `${count} devices` : 'Live';
+                    badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-200/60 dark:bg-emerald-800/60 text-[10px]';
+                }
+                widget.title = `Realtime Live Sync Active (${count} connected device${count > 1 ? 's' : ''}). Click for details.`;
+            } else if (app.realtime.status === 'syncing') {
+                widget.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm';
+                if (pulse) pulse.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75';
+                if (dot) dot.className = 'relative inline-flex rounded-full h-2 w-2 bg-amber-500';
+                if (text) text.textContent = 'Syncing...';
+                if (badge) {
+                    badge.textContent = '...';
+                    badge.className = 'px-1.5 py-0.2 rounded-full bg-amber-200/60 dark:bg-amber-800/60 text-[10px]';
+                }
+                widget.title = 'Synchronizing with server...';
+            } else {
+                // Offline
+                widget.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm';
+                if (pulse) pulse.className = 'hidden';
+                if (dot) dot.className = 'relative inline-flex rounded-full h-2 w-2 bg-rose-500';
+                if (text) text.textContent = 'Offline';
+                if (badge) {
+                    const qCount = app.realtime.pendingQueue.length;
+                    badge.textContent = qCount > 0 ? `${qCount} queued` : 'Local';
+                    badge.className = 'px-1.5 py-0.2 rounded-full bg-rose-200/60 dark:bg-rose-800/60 text-[10px]';
+                }
+                widget.title = 'Offline mode (Working locally). Click for diagnostics.';
+            }
+        },
+
+        getSocketId: () => {
+            return app.realtime.socket?.id || null;
+        },
+
+        queueOfflineMutation: (type, targetId, payload) => {
+            const op = {
+                id: 'op_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+                type,
+                targetId,
+                payload,
+                queuedAt: new Date().toISOString()
+            };
+            app.realtime.pendingQueue.push(op);
+            localStorage.setItem('pos_offline_queue', JSON.stringify(app.realtime.pendingQueue));
+            app.realtime.updateStatusUI();
+            console.log('📦 Queued offline action:', op);
+        },
+
+        flushOfflineQueue: async () => {
+            if (app.realtime.pendingQueue.length === 0) return;
+            console.log(`📤 Flushing ${app.realtime.pendingQueue.length} offline operations to server...`);
+            try {
+                const res = await fetch(app.getApiUrl('/api/sync/batch'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ operations: app.realtime.pendingQueue })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.success) {
+                        console.log('✅ Offline queue synced successfully:', data.processed);
+                        app.realtime.pendingQueue = [];
+                        localStorage.removeItem('pos_offline_queue');
+                        app.realtime.updateStatusUI();
+                        await app.syncWithBackend(false);
+                    }
+                }
+            } catch (err) {
+                console.warn('Could not flush offline queue:', err);
+            }
+        },
+
+        handleIncomingEvent: async (event) => {
+            if (!event || !event.type) return;
+            console.log('⚡ [Realtime Sync Event]:', event.type, event.data);
+            app.realtime.lastSyncTime = new Date();
+
+            try {
+                switch (event.type) {
+                    case 'ITEM_CREATED':
+                    case 'ITEM_UPDATED': {
+                        const item = event.data;
+                        if (item && item.id) {
+                            await db.items.put(item);
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                            if (app.state.currentView === 'products') app.renderInventory();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'ITEM_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.items.delete(Number(id));
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                            if (app.state.currentView === 'products') app.renderInventory();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'STOCK_CHANGED': {
+                        const { id, stock } = event.data || {};
+                        if (id && stock !== undefined) {
+                            await db.items.update(Number(id), { stock: Number(stock) });
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                            if (app.state.currentView === 'products') app.renderInventory();
+                        }
+                        break;
+                    }
+                    case 'SALE_CREATED': {
+                        const { sale, items, cashier } = event.data || {};
+                        if (sale) {
+                            await db.sales.put(sale);
+                            if (items && Array.isArray(items) && items.length > 0) {
+                                for (const it of items) {
+                                    await db.items.put(it);
+                                }
+                            }
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                            if (app.state.currentView === 'sales') app.renderSalesHistory();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                            if (app.state.currentView === 'reports') app.renderReports();
+                            if (app.state.currentView === 'credits') app.renderCredits();
+
+                            const cashierName = cashier ? ` (${cashier})` : '';
+                            Swal.fire({
+                                toast: true,
+                                position: 'top-end',
+                                icon: 'info',
+                                title: `🛒 New Sale: LKR ${Number(sale.total).toFixed(2)}${cashierName}`,
+                                timer: 2500,
+                                showConfirmButton: false
+                            });
+                        }
+                        break;
+                    }
+                    case 'SALE_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.sales.delete(Number(id));
+                            if (app.state.currentView === 'sales') app.renderSalesHistory();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'REPAIR_CREATED':
+                    case 'REPAIR_UPDATED': {
+                        const repair = event.data;
+                        if (repair && repair.id) {
+                            await db.repairs.put(repair);
+                            if (app.state.currentView === 'repairs') app.renderRepairs();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+
+                            Swal.fire({
+                                toast: true,
+                                position: 'top-end',
+                                icon: 'info',
+                                title: `🔧 Repair Updated: ${repair.phoneModel} (${repair.status})`,
+                                timer: 2500,
+                                showConfirmButton: false
+                            });
+                        }
+                        break;
+                    }
+                    case 'REPAIR_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.repairs.delete(Number(id));
+                            if (app.state.currentView === 'repairs') app.renderRepairs();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'EXPENSE_CREATED': {
+                        const expense = event.data;
+                        if (expense && expense.id) {
+                            await db.expenses.put(expense);
+                            if (app.state.currentView === 'expenses') app.renderExpenses();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                            if (app.state.currentView === 'reports') app.renderReports();
+                        }
+                        break;
+                    }
+                    case 'EXPENSE_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.expenses.delete(Number(id));
+                            if (app.state.currentView === 'expenses') app.renderExpenses();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'CREDITOR_CREATED':
+                    case 'CREDITOR_UPDATED': {
+                        const creditor = event.data;
+                        if (creditor && creditor.id) {
+                            await db.creditors.put(creditor);
+                            if (app.state.currentView === 'credits') app.renderCredits();
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                        }
+                        break;
+                    }
+                    case 'CREDITOR_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.creditors.delete(Number(id));
+                            if (app.state.currentView === 'credits') app.renderCredits();
+                            if (app.state.currentView === 'pos') app.renderPOS();
+                        }
+                        break;
+                    }
+                    case 'BANK_TX_CREATED': {
+                        const tx = event.data;
+                        if (tx && tx.id) {
+                            await db.bankTransactions.put(tx);
+                            if (app.state.currentView === 'bank') app.renderBankTracker();
+                            if (app.state.currentView === 'dashboard') app.renderDashboard();
+                        }
+                        break;
+                    }
+                    case 'BANK_TX_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.bankTransactions.delete(Number(id));
+                            if (app.state.currentView === 'bank') app.renderBankTracker();
+                        }
+                        break;
+                    }
+                    case 'SUPPLIER_CREATED': {
+                        const supplier = event.data;
+                        if (supplier && supplier.id) {
+                            await db.suppliers.put(supplier);
+                            if (app.state.currentView === 'suppliers') app.renderSuppliers();
+                        }
+                        break;
+                    }
+                    case 'SUPPLIER_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.suppliers.delete(Number(id));
+                            if (app.state.currentView === 'suppliers') app.renderSuppliers();
+                        }
+                        break;
+                    }
+                    case 'BILL_CREATED':
+                    case 'BILL_UPDATED': {
+                        const bill = event.data;
+                        if (bill && bill.id) {
+                            await db.purchaseBills.put(bill);
+                            if (app.state.currentView === 'suppliers') app.renderSuppliers();
+                        }
+                        break;
+                    }
+                    case 'BILL_DELETED': {
+                        const { id } = event.data || {};
+                        if (id) {
+                            await db.purchaseBills.delete(Number(id));
+                            if (app.state.currentView === 'suppliers') app.renderSuppliers();
+                        }
+                        break;
+                    }
+                    case 'SETTINGS_UPDATED': {
+                        const { key, value } = event.data || {};
+                        if (key) {
+                            localStorage.setItem(`krishan_pos_${key}`, value);
+                            app.updateShopProfileHeader();
+                        }
+                        break;
+                    }
+                    case 'BATCH_SYNC_COMPLETED': {
+                        await app.syncWithBackend(false);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            } catch (eventErr) {
+                console.error('Error handling incoming realtime event:', eventErr);
+            }
+        }
+    },
+
+    // Unified socket-aware API Caller with offline fallback
+    apiCall: async (path, method = 'GET', data = null, offlineAction = null, offlineId = null) => {
+        const url = app.getApiUrl(path);
+        const headers = { 'Content-Type': 'application/json' };
+        const socketId = app.realtime.getSocketId();
+        if (socketId) {
+            headers['x-socket-id'] = socketId;
+        }
+
+        const options = {
+            method,
+            headers,
+            credentials: 'include'
+        };
+
+        if (data && method !== 'GET') {
+            options.body = JSON.stringify(data);
+        }
+
+        try {
+            const res = await fetch(url, options);
+            if (!res.ok) {
+                throw new Error(`HTTP error ${res.status}`);
+            }
+            return await res.json();
+        } catch (err) {
+            console.warn(`API call failed for ${method} ${path}:`, err.message);
+            if (offlineAction && data) {
+                app.realtime.queueOfflineMutation(offlineAction, offlineId, data);
+            }
+            return null;
+        }
+    },
+
+    triggerManualSync: async () => {
+        const icon = document.getElementById('manual-sync-icon');
+        if (icon) icon.classList.add('fa-spin');
+        app.realtime.setStatus('syncing');
+
+        try {
+            await app.realtime.flushOfflineQueue();
+            await app.syncWithBackend(true);
+            app.realtime.setStatus('connected');
+            Swal.fire({
+                toast: true,
+                position: 'top-end',
+                icon: 'success',
+                title: 'Data Synced Successfully!',
+                timer: 1500,
+                showConfirmButton: false
+            });
+        } catch (e) {
+            Swal.fire({
+                toast: true,
+                position: 'top-end',
+                icon: 'error',
+                title: 'Sync failed: ' + (e.message || 'Server offline'),
+                timer: 2000,
+                showConfirmButton: false
+            });
+        } finally {
+            if (icon) icon.classList.remove('fa-spin');
+        }
+    },
+
+    showSyncStatusModal: () => {
+        const status = app.realtime.status;
+        const count = app.realtime.deviceCount || 1;
+        const lastSync = app.realtime.lastSyncTime ? new Date(app.realtime.lastSyncTime).toLocaleTimeString() : 'Just now';
+        const queueCount = app.realtime.pendingQueue.length;
+        const statusColor = status === 'connected' ? 'text-emerald-600 dark:text-emerald-400' : (status === 'syncing' ? 'text-amber-500' : 'text-rose-500');
+        const statusBadge = status === 'connected' ? '🟢 Live Connected' : (status === 'syncing' ? '🟡 Syncing...' : '🔴 Offline Mode');
+
+        Swal.fire({
+            title: '<div class="flex items-center justify-center gap-2 text-xl font-bold"><i class="fa-solid fa-tower-broadcast text-violet-600"></i> Realtime Sync Status</div>',
+            html: `
+                <div class="text-left space-y-4 my-2 text-sm">
+                    <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2.5">
+                        <div class="flex justify-between items-center">
+                            <span class="font-semibold text-slate-500 dark:text-slate-400">Connection State:</span>
+                            <span class="font-bold ${statusColor}">${statusBadge}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-semibold text-slate-500 dark:text-slate-400">Connected Devices:</span>
+                            <span class="font-bold text-slate-800 dark:text-white">${count} active device(s)</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-semibold text-slate-500 dark:text-slate-400">Last Synced:</span>
+                            <span class="font-bold text-slate-800 dark:text-white">${lastSync}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-semibold text-slate-500 dark:text-slate-400">Pending Offline Queue:</span>
+                            <span class="font-bold ${queueCount > 0 ? 'text-amber-600' : 'text-slate-800 dark:text-white'}">${queueCount} actions</span>
+                        </div>
+                        <div class="flex justify-between items-center text-xs text-slate-400 pt-1 border-t border-slate-200 dark:border-slate-700">
+                            <span>Server Host:</span>
+                            <span class="font-mono">${window.location.host || 'localhost:3000'}</span>
+                        </div>
+                    </div>
+
+                    <p class="text-xs text-slate-400 leading-relaxed">
+                        ✨ Sales, inventory stock, repairs, expenses, and credit records are synced live across all counter PCs, mobile phones, and laptops in real time.
+                    </p>
+                </div>
+            `,
+            showCancelButton: true,
+            confirmButtonText: '<i class="fa-solid fa-arrows-rotate mr-1.5"></i> Force Full Sync',
+            cancelButtonText: 'Close',
+            confirmButtonColor: '#7c3aed'
+        }).then((res) => {
+            if (res.isConfirmed) {
+                app.triggerManualSync();
+            }
+        });
     },
 
     init: async () => {
@@ -78,16 +565,19 @@ const app = {
             setInterval(app.updateDateTime, 1000);
             app.initTheme();
 
-            // 1. Verify authentication
+            // 1. Initialize Realtime Engine
+            app.realtime.init();
+
+            // 2. Verify authentication
             const isAuth = await app.checkAuth();
             if (!isAuth) {
                 app.showLoginOverlay();
                 return;
             }
 
-            // 2. Sync with SQLite backend database (if available)
+            // 3. Sync with SQLite backend database
             try {
-                await app.syncWithBackend();
+                await app.syncWithBackend(false);
             } catch (syncErr) {
                 console.warn('Backend sync skipped/failed:', syncErr);
             }
@@ -350,7 +840,7 @@ const app = {
         }
     },
 
-    syncWithBackend: async () => {
+    syncWithBackend: async (refreshView = false) => {
         try {
             const [items, sales, repairs, expenses, creditors, bankTx, suppliers, bills, settings] = await Promise.all([
                 fetch(app.getApiUrl('/api/items'), { credentials: 'include' }).then(r => r.ok ? r.json() : []).catch(() => []),
@@ -365,35 +855,35 @@ const app = {
             ]);
 
             await db.transaction('rw', db.items, db.sales, db.repairs, db.expenses, db.creditors, db.bankTransactions, db.suppliers, db.purchaseBills, async () => {
-                if (items && items.length > 0) {
+                if (items && Array.isArray(items) && items.length > 0) {
                     await db.items.clear();
                     await db.items.bulkAdd(items);
                 }
-                if (sales && sales.length > 0) {
+                if (sales && Array.isArray(sales) && sales.length > 0) {
                     await db.sales.clear();
                     await db.sales.bulkAdd(sales);
                 }
-                if (repairs && repairs.length > 0) {
+                if (repairs && Array.isArray(repairs) && repairs.length > 0) {
                     await db.repairs.clear();
                     await db.repairs.bulkAdd(repairs);
                 }
-                if (expenses && expenses.length > 0) {
+                if (expenses && Array.isArray(expenses) && expenses.length > 0) {
                     await db.expenses.clear();
                     await db.expenses.bulkAdd(expenses);
                 }
-                if (creditors && creditors.length > 0) {
+                if (creditors && Array.isArray(creditors) && creditors.length > 0) {
                     await db.creditors.clear();
                     await db.creditors.bulkAdd(creditors);
                 }
-                if (bankTx && bankTx.length > 0) {
+                if (bankTx && Array.isArray(bankTx) && bankTx.length > 0) {
                     await db.bankTransactions.clear();
                     await db.bankTransactions.bulkAdd(bankTx);
                 }
-                if (suppliers && suppliers.length > 0) {
+                if (suppliers && Array.isArray(suppliers) && suppliers.length > 0) {
                     await db.suppliers.clear();
                     await db.suppliers.bulkAdd(suppliers);
                 }
-                if (bills && bills.length > 0) {
+                if (bills && Array.isArray(bills) && bills.length > 0) {
                     await db.purchaseBills.clear();
                     await db.purchaseBills.bulkAdd(bills);
                 }
@@ -404,6 +894,13 @@ const app = {
                 if (settings.owner_name) localStorage.setItem('krishan_pos_owner_name', settings.owner_name);
                 if (settings.phone) localStorage.setItem('krishan_pos_phone', settings.phone);
                 if (settings.address) localStorage.setItem('krishan_pos_address', settings.address);
+                app.updateShopProfileHeader();
+            }
+
+            app.realtime.lastSyncTime = new Date();
+
+            if (refreshView && app.state.currentView) {
+                app.navigate(app.state.currentView);
             }
         } catch (err) {
             console.warn('Backend sync warning:', err);
@@ -461,6 +958,11 @@ const app = {
         localStorage.setItem('krishan_pos_owner_name', profile.ownerName || 'Owner');
         localStorage.setItem('krishan_pos_phone', profile.phone || '');
         localStorage.setItem('krishan_pos_address', profile.address || '');
+
+        app.apiCall('/api/settings', 'POST', { key: 'shop_name', value: profile.shopName || '' }, 'set_setting');
+        app.apiCall('/api/settings', 'POST', { key: 'owner_name', value: profile.ownerName || '' }, 'set_setting');
+        app.apiCall('/api/settings', 'POST', { key: 'phone', value: profile.phone || '' }, 'set_setting');
+        app.apiCall('/api/settings', 'POST', { key: 'address', value: profile.address || '' }, 'set_setting');
     },
 
     updateShopProfileHeader: () => {
@@ -938,12 +1440,14 @@ const app = {
         });
 
         if (formValues) {
-            await db.bankTransactions.add({
+            const txRecord = {
                 date: new Date().toISOString(),
                 type: type,
                 amount: formValues.amount,
                 note: formValues.note
-            });
+            };
+            const newId = await db.bankTransactions.add(txRecord);
+            app.apiCall('/api/bank-transactions', 'POST', { id: newId, ...txRecord }, 'create_bank_tx');
             app.renderBankTracker();
             
             Swal.fire({
@@ -969,6 +1473,7 @@ const app = {
 
         if (result.isConfirmed) {
             await db.bankTransactions.delete(id);
+            app.apiCall(`/api/bank-transactions/${id}`, 'DELETE', null, 'delete_bank_tx', id);
             app.renderBankTracker();
         }
     },
@@ -998,46 +1503,49 @@ const app = {
                         <div class="bg-white rounded-[2rem] shadow-xl border border-slate-200 overflow-hidden min-h-[500px]">
                             ${suppliers.length === 0 ? `
                                 <div class="p-20 text-center opacity-30">
-                                    <i class="fa-solid fa-users text-5xl mb-4"></i>
-                                    <p class="font-bold">No suppliers yet</p>
+                                    <i class="fa-solid fa-truck-field text-5xl mb-3"></i>
+                                    <p class="text-xs font-bold uppercase tracking-widest">No Suppliers Found</p>
                                 </div>
                             ` : `
-                                <div class="divide-y divide-slate-50">
+                                <div class="divide-y divide-slate-100 max-h-[500px] overflow-y-auto">
                                     ${suppliers.map(s => {
-            const supplierBills = bills.filter(b => b.supplierId === s.id);
-            const pendingTotal = supplierBills.filter(b => b.status === 'pending').reduce((sum, b) => sum + b.total, 0);
-            return `
-                                            <div onclick="app.viewSupplierBills(${s.id})" class="supplier-item-${s.id} p-6 hover:bg-slate-100 cursor-pointer transition-colors group relative">
-                                                <div class="flex justify-between items-start mb-2">
-                                                    <h4 class="font-black text-slate-800 text-lg group-hover:text-violet-700 transition-colors">${s.name}</h4>
-                                                    <button onclick="event.stopPropagation(); app.deleteSupplier(${s.id})" class="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all">
-                                                        <i class="fa-solid fa-trash-can text-sm"></i>
-                                                    </button>
+                                        const supplierBills = bills.filter(b => b.supplierId === s.id);
+                                        const pendingTotal = supplierBills.reduce((sum, b) => sum + (b.total - (b.paidAmount || 0)), 0);
+                                        return `
+                                            <div onclick="app.viewSupplierBills(${s.id})" 
+                                                 class="supplier-item-${s.id} p-5 hover:bg-slate-50 cursor-pointer transition-all flex items-center justify-between group">
+                                                <div class="space-y-1">
+                                                    <h4 class="font-black text-slate-800 text-base group-hover:text-violet-600 transition-colors">${s.name}</h4>
+                                                    <p class="text-xs text-slate-400 font-medium">${s.company || 'Direct Supplier'}</p>
+                                                    ${pendingTotal > 0 ? `
+                                                        <span class="inline-block text-[10px] font-black uppercase tracking-wider text-red-500 bg-red-50 px-2 py-0.5 rounded-md">
+                                                            LKR ${pendingTotal.toLocaleString()} Due
+                                                        </span>
+                                                    ` : `
+                                                        <span class="inline-block text-[10px] font-black uppercase tracking-wider text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-md">
+                                                            Settled
+                                                        </span>
+                                                    `}
                                                 </div>
-                                                <p class="text-xs text-slate-500 font-bold uppercase mb-3"><i class="fa-solid fa-building mr-1"></i> ${s.company || 'Private Supplier'}</p>
-                                                <div class="flex justify-between items-center">
-                                                    <span class="text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-md font-bold">${supplierBills.length} Bills</span>
-                                                    ${pendingTotal > 0 ? `<span class="text-[10px] bg-red-50 text-red-600 px-2 py-1 rounded-md font-bold">To Pay: ${pendingTotal}</span>` : `<span class="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-md font-bold">Paid</span>`}
-                                                </div>
+                                                <button onclick="event.stopPropagation(); app.deleteSupplier(${s.id})" 
+                                                        class="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all">
+                                                    <i class="fa-solid fa-trash-can"></i>
+                                                </button>
                                             </div>
                                         `;
-        }).join('')}
+                                    }).join('')}
                                 </div>
                             `}
                         </div>
                     </div>
 
-                    <!-- Bills Management -->
-                    <div class="lg:col-span-2">
-                         <div id="supplier-bills-view" class="h-full">
-                            <div class="bg-white rounded-[2rem] shadow-xl border border-slate-200 p-12 h-full flex flex-col items-center justify-center text-slate-400 text-center">
-                                <div class="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mb-6">
-                                    <i class="fa-solid fa-file-invoice-dollar text-4xl opacity-20"></i>
-                                </div>
-                                <h3 class="text-xl font-bold text-slate-600">Supplier Details</h3>
-                                <p class="text-sm max-w-[300px]">Select a supplier from the left to view their bill history and outstanding payments.</p>
-                            </div>
-                         </div>
+                    <!-- Supplier Details & Bills -->
+                    <div id="supplier-bills-view" class="lg:col-span-2">
+                        <div class="h-full bg-slate-50/50 rounded-[2rem] border-2 border-dashed border-slate-200 flex flex-col items-center justify-center p-12 text-center text-slate-400">
+                            <i class="fa-solid fa-hand-pointer text-4xl mb-4 text-slate-300"></i>
+                            <p class="font-bold">Select a supplier from the list</p>
+                            <p class="text-xs">to view purchase bills and settle payments</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1070,7 +1578,8 @@ const app = {
         });
 
         if (formValues) {
-            await db.suppliers.add(formValues);
+            const newId = await db.suppliers.add(formValues);
+            app.apiCall('/api/suppliers', 'POST', { id: newId, ...formValues }, 'create_supplier');
             app.renderSuppliers();
             Swal.fire({ icon: 'success', title: 'Supplier added', toast: true, position: 'top-end', timer: 2000, showConfirmButton: false });
         }
@@ -1193,7 +1702,8 @@ const app = {
         });
 
         if (formValues) {
-            await db.purchaseBills.add(formValues);
+            const newId = await db.purchaseBills.add(formValues);
+            app.apiCall('/api/purchase-bills', 'POST', { id: newId, ...formValues }, 'create_bill');
             app.viewSupplierBills(supplierId);
             app.renderSuppliers();
         }
@@ -1234,10 +1744,16 @@ const app = {
             const newTotalPaid = currentPaid + paidAmount;
             const newStatus = newTotalPaid >= bill.total ? 'paid' : 'pending';
             
+            const updatedBill = { 
+                ...bill,
+                paidAmount: newTotalPaid,
+                status: newStatus
+            };
             await db.purchaseBills.update(billId, { 
                 paidAmount: newTotalPaid,
                 status: newStatus
             });
+            app.apiCall(`/api/purchase-bills/${billId}`, 'PUT', updatedBill, 'update_bill', billId);
             
             app.viewSupplierBills(supplierId);
             app.renderSuppliers();
@@ -1248,6 +1764,7 @@ const app = {
     deleteSupplierBill: async (id, supplierId) => {
         if (confirm('Delete this bill record?')) {
             await db.purchaseBills.delete(id);
+            app.apiCall(`/api/purchase-bills/${id}`, 'DELETE', null, 'delete_bill', id);
             app.viewSupplierBills(supplierId);
             app.renderSuppliers();
         }
@@ -1257,6 +1774,7 @@ const app = {
         if (confirm('Delete this supplier? All history will be deleted.')) {
             await db.suppliers.delete(id);
             await db.purchaseBills.where('supplierId').equals(id).delete();
+            app.apiCall(`/api/suppliers/${id}`, 'DELETE', null, 'delete_supplier', id);
             app.renderSuppliers();
         }
     },
@@ -2097,21 +2615,35 @@ const app = {
         }
 
         try {
-            // 1. Save Sale
-            const saleId = await db.sales.add({
+            const saleRecord = {
                 date: new Date().toISOString(),
                 items: JSON.parse(JSON.stringify(app.state.cart)),
-                subTotal, discount, total: cartTotal, amountPaid, paymentMethod,
-                creditorId: creditor ? creditor.id : null
-            });
+                subTotal,
+                discount,
+                total: cartTotal,
+                amountPaid,
+                paymentMethod,
+                creditorId: creditor ? creditor.id : null,
+                customerName: creditor ? creditor.name : '',
+                customerPhone: creditor ? (creditor.contact || creditor.phone || '') : ''
+            };
 
-            // 2. Update Creditor Balance
+            // 1. Save Sale to Dexie Local Store
+            const saleId = await db.sales.add(saleRecord);
+
+            // 2. Update Creditor Balance if applicable
             if (creditor) {
                 const newDebt = totalOutstanding - amountPaid;
-                await db.creditors.update(creditor.id, { 
+                const updatedCred = { 
+                    ...creditor,
                     amount: newDebt,
                     lastUpdated: new Date().toISOString() 
+                };
+                await db.creditors.update(creditor.id, { 
+                    amount: newDebt,
+                    lastUpdated: updatedCred.lastUpdated 
                 });
+                app.apiCall(`/api/creditors/${creditor.id}`, 'PUT', updatedCred, 'update_creditor', creditor.id);
             }
 
             // 3. Update Inventory Stock
@@ -2124,7 +2656,10 @@ const app = {
                 }
             }
 
-            // 4. Success & Cleanup
+            // 4. Send Sale to Server with Socket Header (broadcasts to all other devices)
+            app.apiCall('/api/sales', 'POST', { id: saleId, ...saleRecord }, 'create_sale');
+
+            // 5. Success & Cleanup
             app.state.cart = [];
             app.state.discount = 0;
             app.state.selectedCreditor = null;
@@ -2469,6 +3004,7 @@ const app = {
         if (addAmount) {
             const amount = parseInt(addAmount);
             await db.items.update(id, { stock: item.stock + amount });
+            app.apiCall(`/api/items/${id}/adjust-stock`, 'POST', { delta: amount }, 'adjust_stock', id);
 
             const Toast = Swal.mixin({
                 toast: true,
@@ -2628,8 +3164,10 @@ const app = {
 
             if (id) {
                 await db.items.update(id, formValues);
+                app.apiCall(`/api/items/${id}`, 'PUT', formValues, 'update_item', id);
             } else {
-                await db.items.add(formValues);
+                const newId = await db.items.add(formValues);
+                app.apiCall('/api/items', 'POST', { id: newId, ...formValues }, 'create_item');
             }
             app.renderInventory();
             Swal.fire({ icon: 'success', title: 'Saved', timer: 1000, showConfirmButton: false });
@@ -2648,6 +3186,7 @@ const app = {
 
         if (result.isConfirmed) {
             await db.items.delete(id);
+            app.apiCall(`/api/items/${id}`, 'DELETE', null, 'delete_item', id);
             app.renderInventory();
             Swal.fire('Deleted!', 'Item has been deleted.', 'success');
         }
@@ -2781,9 +3320,11 @@ const app = {
         if (formValues) {
             if (id) {
                 await db.repairs.update(id, formValues);
+                app.apiCall(`/api/repairs/${id}`, 'PUT', formValues, 'update_repair', id);
                 Swal.fire({ icon: 'success', title: 'Job Updated', timer: 1000, showConfirmButton: false });
             } else {
-                await db.repairs.add(formValues);
+                const newId = await db.repairs.add(formValues);
+                app.apiCall('/api/repairs', 'POST', { id: newId, ...formValues }, 'create_repair');
                 Swal.fire({ icon: 'success', title: 'Job Created', timer: 1000, showConfirmButton: false });
             }
             app.renderRepairs();
@@ -2807,6 +3348,8 @@ const app = {
 
         if (status) {
             await db.repairs.update(id, { status });
+            const updated = await db.repairs.get(id);
+            app.apiCall(`/api/repairs/${id}`, 'PUT', updated, 'update_repair', id);
             app.renderRepairs();
         }
     },
@@ -2814,6 +3357,7 @@ const app = {
     deleteRepair: async (id) => {
         if (await Swal.fire({ title: 'Delete job?', icon: 'warning', showCancelButton: true }).then(r => r.isConfirmed)) {
             await db.repairs.delete(id);
+            app.apiCall(`/api/repairs/${id}`, 'DELETE', null, 'delete_repair', id);
             app.renderRepairs();
         }
     },
@@ -3021,7 +3565,8 @@ const app = {
         });
 
         if (formValues) {
-            await db.creditors.add(formValues);
+            const newId = await db.creditors.add(formValues);
+            app.apiCall('/api/creditors', 'POST', { id: newId, ...formValues }, 'create_creditor');
             
             // Re-render current view
             const activeNav = document.querySelector('nav a.bg-violet-600')?.innerText?.toLowerCase() || '';
@@ -3079,7 +3624,11 @@ const app = {
                 else newAmount += numericAmount; // we paid supplier (debt decreases)
             }
 
-            await db.creditors.update(id, { amount: newAmount, lastUpdated: new Date().toISOString() });
+            const updatedObj = { amount: newAmount, lastUpdated: new Date().toISOString() };
+            await db.creditors.update(id, updatedObj);
+            const fullUpdated = await db.creditors.get(id);
+            app.apiCall(`/api/creditors/${id}`, 'PUT', fullUpdated, 'update_creditor', id);
+
             app.renderCredits();
             Swal.fire({ icon: 'success', title: 'ශේෂය යාවත්කාලීන කරන ලදී (Balance Updated)', timer: 1500, showConfirmButton: false, toast: true, position: 'top-end' });
         }
@@ -3088,6 +3637,7 @@ const app = {
     deleteCreditor: async (id) => {
         if ((await Swal.fire({ title: 'Are you sure?', icon: 'warning', showCancelButton: true })).isConfirmed) {
             await db.creditors.delete(id);
+            app.apiCall(`/api/creditors/${id}`, 'DELETE', null, 'delete_creditor', id);
             app.renderCredits();
         }
     },
@@ -3108,21 +3658,30 @@ const app = {
                     <input id="exp-amount" type="number" class="swal2-input m-0 w-full" placeholder="Amount">
                 </div>
             `,
-    showCancelButton: true,
-    preConfirm: () => {
-        return {
-            description: document.getElementById('exp-desc').value,
-            category: document.getElementById('exp-cat').value,
-            amount: parseFloat(document.getElementById('exp-amount').value) || 0,
-            date: new Date().toISOString()
-        }
-    }
-});
+            showCancelButton: true,
+            preConfirm: () => {
+                return {
+                    description: document.getElementById('exp-desc').value,
+                    category: document.getElementById('exp-cat').value,
+                    amount: parseFloat(document.getElementById('exp-amount').value) || 0,
+                    date: new Date().toISOString()
+                }
+            }
+        });
 
-if (formValues) {
-    await db.expenses.add(formValues);
-    Swal.fire({ icon: 'success', title: 'Expense Added', timer: 1000, showConfirmButton: false });
-}
+        if (formValues) {
+            const newId = await db.expenses.add(formValues);
+            app.apiCall('/api/expenses', 'POST', { id: newId, ...formValues }, 'create_expense');
+            Swal.fire({ icon: 'success', title: 'Expense Added', timer: 1000, showConfirmButton: false });
+        }
+    },
+
+    deleteExpense: async (id) => {
+        if ((await Swal.fire({ title: 'Delete expense?', icon: 'warning', showCancelButton: true })).isConfirmed) {
+            await db.expenses.delete(id);
+            app.apiCall(`/api/expenses/${id}`, 'DELETE', null, 'delete_expense', id);
+            app.renderExpenses();
+        }
     },
 
     // --- SALES HISTORY ---
@@ -3377,7 +3936,7 @@ if (formValues) {
         });
 
         if (confirm.isConfirmed) {
-            const saleId = await db.sales.add({
+            const saleRecord = {
                 date: new Date().toISOString(),
                 items: saleItems,
                 subTotal: totalToPay,
@@ -3385,7 +3944,9 @@ if (formValues) {
                 total: totalToPay,
                 paymentMethod: 'Cash',
                 isUtility: true
-            });
+            };
+            const saleId = await db.sales.add(saleRecord);
+            app.apiCall('/api/sales', 'POST', { id: saleId, ...saleRecord }, 'create_sale');
 
             await Swal.fire({ icon: 'success', title: 'Payments Successful', timer: 1500, showConfirmButton: false });
             app.printReceipt(saleId);

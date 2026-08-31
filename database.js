@@ -426,6 +426,28 @@ const dbService = {
         jsonDb.save();
         return newSale;
     },
+    deleteSale: (id) => {
+        if (db) {
+            db.prepare('DELETE FROM sales WHERE id = ?').run(id);
+            return true;
+        }
+        jsonDb.data.sales = jsonDb.data.sales.filter(s => s.id !== Number(id));
+        jsonDb.save();
+        return true;
+    },
+    adjustItemStock: (id, delta) => {
+        if (db) {
+            db.prepare('UPDATE items SET stock = MAX(0, stock + ?) WHERE id = ?').run(delta, id);
+            return dbService.getItemById(id);
+        }
+        const item = jsonDb.data.items.find(i => i.id === Number(id));
+        if (item) {
+            item.stock = Math.max(0, (item.stock || 0) + delta);
+            jsonDb.save();
+            return item;
+        }
+        return null;
+    },
 
     // REPAIRS
     getRepairs: () => {
@@ -646,6 +668,43 @@ const dbService = {
         jsonDb.data.purchase_bills.push(newBill);
         jsonDb.save();
         return newBill;
+    },
+    updatePurchaseBill: (id, bill) => {
+        const itemsJson = bill.items ? JSON.stringify(bill.items) : undefined;
+        if (db) {
+            const existing = db.prepare('SELECT * FROM purchase_bills WHERE id = ?').get(id);
+            if (!existing) return null;
+            const updatedSupplierId = bill.supplierId !== undefined ? bill.supplierId : existing.supplier_id;
+            const updatedSupplierName = bill.supplierName !== undefined ? bill.supplierName : existing.supplier_name;
+            const updatedDate = bill.date !== undefined ? bill.date : existing.date;
+            const updatedTotal = bill.total !== undefined ? bill.total : existing.total;
+            const updatedStatus = bill.status !== undefined ? bill.status : existing.status;
+            const updatedItemsJson = itemsJson !== undefined ? itemsJson : existing.items_json;
+
+            db.prepare(`
+                UPDATE purchase_bills 
+                SET supplier_id = ?, supplier_name = ?, date = ?, total = ?, status = ?, items_json = ?
+                WHERE id = ?
+            `).run(updatedSupplierId, updatedSupplierName, updatedDate, updatedTotal, updatedStatus, updatedItemsJson, id);
+
+            return { id: Number(id), supplierId: updatedSupplierId, supplierName: updatedSupplierName, date: updatedDate, total: updatedTotal, status: updatedStatus, items: JSON.parse(updatedItemsJson || '[]') };
+        }
+        const idx = jsonDb.data.purchase_bills.findIndex(p => p.id === Number(id));
+        if (idx !== -1) {
+            jsonDb.data.purchase_bills[idx] = { ...jsonDb.data.purchase_bills[idx], ...bill };
+            jsonDb.save();
+            return jsonDb.data.purchase_bills[idx];
+        }
+        return null;
+    },
+    deletePurchaseBill: (id) => {
+        if (db) {
+            db.prepare('DELETE FROM purchase_bills WHERE id = ?').run(id);
+            return true;
+        }
+        jsonDb.data.purchase_bills = jsonDb.data.purchase_bills.filter(p => p.id !== Number(id));
+        jsonDb.save();
+        return true;
     },
 
     // SETTINGS

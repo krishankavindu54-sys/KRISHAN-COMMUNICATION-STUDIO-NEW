@@ -4,17 +4,92 @@ const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const path = require('path');
+const http = require('http');
+const { Server } = require('socket.io');
 require('dotenv').config();
 
 const { dbService } = require('./database');
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'krishan-pos-jwt-super-secret-key-2026';
 const SESSION_DURATION = 12 * 60 * 60 * 1000; // 12 hours
 
+// Socket.io Realtime Setup
+const io = new Server(server, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST', 'PUT', 'DELETE'],
+        credentials: true
+    },
+    pingTimeout: 20000,
+    pingInterval: 10000
+});
+
+let connectedClients = 0;
+
+io.on('connection', (socket) => {
+    connectedClients++;
+    console.log(`⚡ [Realtime] Device connected: ${socket.id} (Online devices: ${connectedClients})`);
+
+    // Send connection acknowledgement & initial stats
+    socket.emit('sync:welcome', {
+        serverTime: new Date().toISOString(),
+        deviceCount: connectedClients,
+        socketId: socket.id
+    });
+
+    // Broadcast updated device count to all connected clients
+    io.emit('sync:device_count', { count: connectedClients });
+
+    // Handle full snapshot request
+    socket.on('sync:request_full', (callback) => {
+        try {
+            const data = dbService.exportAllData();
+            if (typeof callback === 'function') {
+                callback({ success: true, data });
+            } else {
+                socket.emit('sync:full_snapshot', data);
+            }
+        } catch (err) {
+            console.error('Error serving full snapshot:', err);
+            if (typeof callback === 'function') callback({ success: false, error: err.message });
+        }
+    });
+
+    // Handle latency ping
+    socket.on('sync:ping', (data, callback) => {
+        if (typeof callback === 'function') {
+            callback({ serverTime: Date.now() });
+        }
+    });
+
+    socket.on('disconnect', () => {
+        connectedClients = Math.max(0, connectedClients - 1);
+        console.log(`🔌 [Realtime] Device disconnected: ${socket.id} (Online devices: ${connectedClients})`);
+        io.emit('sync:device_count', { count: connectedClients });
+    });
+});
+
+// Realtime Broadcast Helper
+function broadcastSync(type, data, originSocketId = null) {
+    const payload = {
+        type,
+        data,
+        timestamp: new Date().toISOString(),
+        origin: originSocketId
+    };
+
+    if (originSocketId) {
+        io.except(originSocketId).emit('sync:event', payload);
+    } else {
+        io.emit('sync:event', payload);
+    }
+}
+
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.static(__dirname));
 
@@ -54,6 +129,11 @@ function requireAdmin(req, res, next) {
     }
     req.user = user;
     next();
+}
+
+// Helper to get socket origin header
+function getSocketId(req) {
+    return req.headers['x-socket-id'] || null;
 }
 
 // ──────────────────────────────────────────────
@@ -193,7 +273,7 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// POS DATA CRUD ENDPOINTS
+// POS DATA CRUD ENDPOINTS (WITH REALTIME SYNC)
 // ──────────────────────────────────────────────
 
 // Items / Inventory
@@ -203,17 +283,29 @@ app.get('/api/items', requireAuth, (req, res) => {
 
 app.post('/api/items', requireAuth, (req, res) => {
     const item = dbService.createItem(req.body);
+    broadcastSync('ITEM_CREATED', item, getSocketId(req));
     res.json(item);
 });
 
 app.put('/api/items/:id', requireAuth, (req, res) => {
     const item = dbService.updateItem(req.params.id, req.body);
     if (!item) return res.status(404).json({ message: 'Item not found' });
+    broadcastSync('ITEM_UPDATED', item, getSocketId(req));
+    res.json(item);
+});
+
+app.post('/api/items/:id/adjust-stock', requireAuth, (req, res) => {
+    const delta = Number(req.body.delta) || 0;
+    const item = dbService.adjustItemStock(req.params.id, delta);
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    broadcastSync('STOCK_CHANGED', { id: Number(req.params.id), stock: item.stock, delta, item }, getSocketId(req));
     res.json(item);
 });
 
 app.delete('/api/items/:id', requireAuth, (req, res) => {
-    dbService.deleteItem(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteItem(id);
+    broadcastSync('ITEM_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -225,7 +317,22 @@ app.get('/api/sales', requireAuth, (req, res) => {
 app.post('/api/sales', requireAuth, (req, res) => {
     const saleData = { ...req.body, userId: req.user.id };
     const sale = dbService.createSale(saleData);
+    
+    // Broadcast sale created along with affected fresh items stock
+    broadcastSync('SALE_CREATED', {
+        sale,
+        items: dbService.getItems(),
+        cashier: req.user.name || req.user.username
+    }, getSocketId(req));
+    
     res.json(sale);
+});
+
+app.delete('/api/sales/:id', requireAuth, (req, res) => {
+    const id = Number(req.params.id);
+    dbService.deleteSale(id);
+    broadcastSync('SALE_DELETED', { id }, getSocketId(req));
+    res.json({ success: true });
 });
 
 // Repairs
@@ -235,17 +342,21 @@ app.get('/api/repairs', requireAuth, (req, res) => {
 
 app.post('/api/repairs', requireAuth, (req, res) => {
     const repair = dbService.createRepair(req.body);
+    broadcastSync('REPAIR_CREATED', repair, getSocketId(req));
     res.json(repair);
 });
 
 app.put('/api/repairs/:id', requireAuth, (req, res) => {
     const repair = dbService.updateRepair(req.params.id, req.body);
     if (!repair) return res.status(404).json({ message: 'Repair not found' });
+    broadcastSync('REPAIR_UPDATED', repair, getSocketId(req));
     res.json(repair);
 });
 
 app.delete('/api/repairs/:id', requireAuth, (req, res) => {
-    dbService.deleteRepair(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteRepair(id);
+    broadcastSync('REPAIR_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -256,11 +367,14 @@ app.get('/api/expenses', requireAuth, (req, res) => {
 
 app.post('/api/expenses', requireAuth, (req, res) => {
     const expense = dbService.createExpense(req.body);
+    broadcastSync('EXPENSE_CREATED', expense, getSocketId(req));
     res.json(expense);
 });
 
 app.delete('/api/expenses/:id', requireAuth, (req, res) => {
-    dbService.deleteExpense(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteExpense(id);
+    broadcastSync('EXPENSE_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -271,17 +385,21 @@ app.get('/api/creditors', requireAuth, (req, res) => {
 
 app.post('/api/creditors', requireAuth, (req, res) => {
     const creditor = dbService.createCreditor(req.body);
+    broadcastSync('CREDITOR_CREATED', creditor, getSocketId(req));
     res.json(creditor);
 });
 
 app.put('/api/creditors/:id', requireAuth, (req, res) => {
     const creditor = dbService.updateCreditor(req.params.id, req.body);
     if (!creditor) return res.status(404).json({ message: 'Creditor not found' });
+    broadcastSync('CREDITOR_UPDATED', creditor, getSocketId(req));
     res.json(creditor);
 });
 
 app.delete('/api/creditors/:id', requireAuth, (req, res) => {
-    dbService.deleteCreditor(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteCreditor(id);
+    broadcastSync('CREDITOR_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -292,11 +410,14 @@ app.get('/api/bank-transactions', requireAuth, (req, res) => {
 
 app.post('/api/bank-transactions', requireAuth, (req, res) => {
     const tx = dbService.createBankTransaction(req.body);
+    broadcastSync('BANK_TX_CREATED', tx, getSocketId(req));
     res.json(tx);
 });
 
 app.delete('/api/bank-transactions/:id', requireAuth, (req, res) => {
-    dbService.deleteBankTransaction(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteBankTransaction(id);
+    broadcastSync('BANK_TX_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -307,11 +428,14 @@ app.get('/api/suppliers', requireAuth, (req, res) => {
 
 app.post('/api/suppliers', requireAuth, (req, res) => {
     const supplier = dbService.createSupplier(req.body);
+    broadcastSync('SUPPLIER_CREATED', supplier, getSocketId(req));
     res.json(supplier);
 });
 
 app.delete('/api/suppliers/:id', requireAuth, (req, res) => {
-    dbService.deleteSupplier(req.params.id);
+    const id = Number(req.params.id);
+    dbService.deleteSupplier(id);
+    broadcastSync('SUPPLIER_DELETED', { id }, getSocketId(req));
     res.json({ success: true });
 });
 
@@ -322,7 +446,22 @@ app.get('/api/purchase-bills', requireAuth, (req, res) => {
 
 app.post('/api/purchase-bills', requireAuth, (req, res) => {
     const bill = dbService.createPurchaseBill(req.body);
+    broadcastSync('BILL_CREATED', bill, getSocketId(req));
     res.json(bill);
+});
+
+app.put('/api/purchase-bills/:id', requireAuth, (req, res) => {
+    const bill = dbService.updatePurchaseBill(req.params.id, req.body);
+    if (!bill) return res.status(404).json({ message: 'Purchase bill not found' });
+    broadcastSync('BILL_UPDATED', bill, getSocketId(req));
+    res.json(bill);
+});
+
+app.delete('/api/purchase-bills/:id', requireAuth, (req, res) => {
+    const id = Number(req.params.id);
+    dbService.deletePurchaseBill(id);
+    broadcastSync('BILL_DELETED', { id }, getSocketId(req));
+    res.json({ success: true });
 });
 
 // Settings
@@ -333,7 +472,75 @@ app.get('/api/settings', (req, res) => {
 app.post('/api/settings', requireAuth, (req, res) => {
     const { key, value } = req.body;
     dbService.setSetting(key, value);
+    broadcastSync('SETTINGS_UPDATED', { key, value }, getSocketId(req));
     res.json({ success: true });
+});
+
+// Full Sync & Diagnostics
+app.get('/api/sync/full', requireAuth, (req, res) => {
+    const data = dbService.exportAllData();
+    res.json({ success: true, data, timestamp: new Date().toISOString() });
+});
+
+// Batch Sync (Offline Queue Processor)
+app.post('/api/sync/batch', requireAuth, (req, res) => {
+    try {
+        const { operations } = req.body || {};
+        if (!Array.isArray(operations) || operations.length === 0) {
+            return res.json({ success: true, processed: 0 });
+        }
+
+        const results = [];
+        for (const op of operations) {
+            try {
+                switch (op.type) {
+                    case 'create_item':
+                        results.push({ opId: op.id, result: dbService.createItem(op.payload) });
+                        break;
+                    case 'update_item':
+                        results.push({ opId: op.id, result: dbService.updateItem(op.targetId, op.payload) });
+                        break;
+                    case 'create_sale':
+                        results.push({ opId: op.id, result: dbService.createSale({ ...op.payload, userId: req.user.id }) });
+                        break;
+                    case 'create_repair':
+                        results.push({ opId: op.id, result: dbService.createRepair(op.payload) });
+                        break;
+                    case 'update_repair':
+                        results.push({ opId: op.id, result: dbService.updateRepair(op.targetId, op.payload) });
+                        break;
+                    case 'create_expense':
+                        results.push({ opId: op.id, result: dbService.createExpense(op.payload) });
+                        break;
+                    case 'create_creditor':
+                        results.push({ opId: op.id, result: dbService.createCreditor(op.payload) });
+                        break;
+                    case 'update_creditor':
+                        results.push({ opId: op.id, result: dbService.updateCreditor(op.targetId, op.payload) });
+                        break;
+                    case 'create_bank_tx':
+                        results.push({ opId: op.id, result: dbService.createBankTransaction(op.payload) });
+                        break;
+                    case 'create_bill':
+                        results.push({ opId: op.id, result: dbService.createPurchaseBill(op.payload) });
+                        break;
+                    default:
+                        break;
+                }
+            } catch (err) {
+                console.error(`Error processing batch operation ${op.id}:`, err);
+                results.push({ opId: op.id, error: err.message });
+            }
+        }
+
+        // Broadcast full update after batch
+        broadcastSync('BATCH_SYNC_COMPLETED', { timestamp: new Date().toISOString() }, getSocketId(req));
+
+        res.json({ success: true, processed: results.length, results });
+    } catch (e) {
+        console.error('Batch sync error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 // Export Backup
@@ -371,26 +578,29 @@ function getLocalIPAddress() {
 
 const localIP = getLocalIPAddress();
 
+app.server = server;
+app.io = io;
 module.exports = app;
 
 if (!process.env.VERCEL) {
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, '0.0.0.0', () => {
         console.log(`=========================================`);
-        console.log(`🚀 Krishan POS Server Running!`);
+        console.log(`🚀 Krishan POS Realtime Server Running!`);
         console.log(`💻 This Computer:  http://localhost:${PORT} or http://krishanpos.local`);
         console.log(`📱 Other Devices:  http://${localIP}:${PORT}`);
+        console.log(`⚡ Realtime Sync:  WebSocket Active on Port ${PORT}`);
         console.log(`🔑 Default Admin:  admin / admin123`);
         console.log(`=========================================`);
     });
 
-    // Also attempt to listen on standard HTTP Port 80 so user can use http://krishanpos.local without specifying :3000
+    // Attempt direct port 80 helper (if running as admin)
     if (Number(PORT) !== 80) {
-        const http = require('http');
-        const server80 = http.createServer(app);
+        const http80 = require('http');
+        const server80 = http80.createServer(app);
         server80.listen(80, '0.0.0.0', () => {
-            console.log(`✨ Direct Port 80 active (Other devices can also visit http://${localIP})`);
+            console.log(`✨ Direct Port 80 active (Visit http://${localIP})`);
         }).on('error', () => {
-            // Port 80 not available, port 3000 remains active
+            // Port 80 busy/forbidden, port 3000 remains active
         });
     }
 }
