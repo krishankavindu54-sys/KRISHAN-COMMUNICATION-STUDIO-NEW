@@ -183,30 +183,65 @@ const app = {
             }, 25000);
         },
 
-        // HTTP Cloud Polling Fallback (ensures Vercel Serverless / Free Cloud stays 100% Live even if WebSockets disconnect)
+        // HTTP Cloud Polling Fallback (ensures Vercel Serverless / Free Cloud stays 100% Live with realtime stock sync)
         startPollingFallback: () => {
             if (app.realtime.pollingInterval) return; // Already polling
 
-            console.log('🔄 [Realtime] Started HTTP Cloud Polling fallback...');
+            console.log('🔄 [Realtime] Started HTTP Cloud Polling & Stock Sync fallback...');
+            let isSyncing = false;
+
             app.realtime.pollingInterval = setInterval(async () => {
-                const targetUrl = app.getApiUrl('/api/auth/me');
+                if (isSyncing) return;
+                isSyncing = true;
                 try {
+                    const targetUrl = app.getApiUrl('/api/items');
                     const res = await fetch(targetUrl, { method: 'GET', credentials: 'include' });
                     if (res.ok) {
-                        if (app.realtime.status !== 'syncing') {
-                            app.realtime.syncMode = 'polling';
-                            app.realtime.setStatus('connected');
+                        const serverItems = await res.json();
+                        if (Array.isArray(serverItems)) {
+                            let hasChanges = false;
+                            const localItems = await db.items.toArray();
+                            const localMap = new Map(localItems.map(i => [i.id, i]));
+
+                            for (const sItem of serverItems) {
+                                const lItem = localMap.get(sItem.id);
+                                if (!lItem || lItem.stock !== sItem.stock || lItem.price !== sItem.price || lItem.name !== sItem.name) {
+                                    await db.items.put(sItem);
+                                    hasChanges = true;
+                                }
+                            }
+
+                            // If stock or items changed, immediately update UI without disrupting inputs
+                            if (hasChanges) {
+                                console.log('⚡ [Cloud Stock Sync] Detected live stock change from server, updating view...');
+                                if (app.state.currentView === 'pos') app.renderPOS();
+                                if (app.state.currentView === 'products') app.renderInventory();
+                                if (app.state.currentView === 'dashboard') app.renderDashboard();
+                            }
+
+                            if (app.realtime.status !== 'syncing') {
+                                app.realtime.syncMode = 'polling';
+                                app.realtime.setStatus('connected');
+                            }
+                            app.realtime.lastSyncTime = new Date();
+
+                            // Also flush offline queue if any
+                            if (app.realtime.pendingQueue.length > 0) {
+                                await app.realtime.flushOfflineQueue();
+                            }
                         }
-                        if (app.realtime.pendingQueue.length > 0) {
-                            app.realtime.flushOfflineQueue();
-                        }
+                    } else if (res.status === 401) {
+                        // Auth check
+                        app.realtime.setStatus('connected');
                     } else {
                         app.realtime.setStatus('offline');
                     }
                 } catch (err) {
                     app.realtime.setStatus('offline');
+                } finally {
+                    isSyncing = false;
                 }
-            }, 6000);
+            }, 3500);
         },
 
         setStatus: (status) => {
