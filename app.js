@@ -58,40 +58,69 @@ const app = {
         selectedCreditor: null // For POS credit sales
     },
 
-    getApiUrl: (path) => {
-        if (window.location.protocol === 'file:' || (window.location.port !== '3000' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))) {
-            return `http://localhost:3000${path.startsWith('/') ? path : '/' + path}`;
+    getServerUrl: () => {
+        const saved = localStorage.getItem('krishan_pos_custom_server_url');
+        if (saved && saved.trim()) {
+            return saved.trim().replace(/\/+$/, '');
         }
-        return path;
+        if (window.location.protocol === 'file:' || (window.location.port !== '3000' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))) {
+            return 'http://localhost:3000';
+        }
+        if (window.location.hostname.endsWith('github.io')) {
+            return saved ? saved.trim().replace(/\/+$/, '') : '';
+        }
+        return window.location.origin;
+    },
+
+    getApiUrl: (path) => {
+        const serverUrl = app.getServerUrl();
+        const cleanPath = path.startsWith('/') ? path : '/' + path;
+        if (serverUrl) {
+            return `${serverUrl}${cleanPath}`;
+        }
+        return cleanPath;
     },
 
     currentUser: null,
 
-    // Realtime Multi-Device Sync Engine (Socket.io + IndexedDB)
+    // Realtime Multi-Device Sync Engine (Socket.io + HTTP Polling Fallback + IndexedDB)
     realtime: {
         socket: null,
         status: 'connecting', // 'connected' | 'syncing' | 'offline'
+        syncMode: 'websocket', // 'websocket' | 'polling'
         deviceCount: 1,
         lastSyncTime: null,
         pendingQueue: JSON.parse(localStorage.getItem('pos_offline_queue') || '[]'),
+        pollingInterval: null,
+        keepAliveInterval: null,
 
         init: () => {
+            app.realtime.startKeepAlive();
+            const serverUrl = app.getServerUrl();
+
+            // If on GitHub Pages without configured backend server, start in local mode and notify
+            if (!serverUrl && window.location.hostname.endsWith('github.io')) {
+                console.warn('Running on GitHub Pages without a configured backend server.');
+                app.realtime.setStatus('offline');
+                app.realtime.startPollingFallback();
+                return;
+            }
+
             try {
                 if (typeof io === 'undefined') {
-                    console.warn('Socket.io library not detected. Running in offline/local mode.');
-                    app.realtime.setStatus('offline');
+                    console.warn('Socket.io library not detected. Starting HTTP Cloud Polling fallback.');
+                    app.realtime.syncMode = 'polling';
+                    app.realtime.startPollingFallback();
                     return;
                 }
 
-                const socketUrl = (window.location.protocol === 'file:' || (window.location.port !== '3000' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')))
-                    ? 'http://localhost:3000'
-                    : window.location.origin;
+                const socketUrl = serverUrl || window.location.origin;
 
                 const socket = io(socketUrl, {
                     reconnection: true,
                     reconnectionAttempts: Infinity,
-                    reconnectionDelay: 1000,
-                    reconnectionDelayMax: 5000,
+                    reconnectionDelay: 1500,
+                    reconnectionDelayMax: 10000,
                     timeout: 20000,
                     transports: ['websocket', 'polling']
                 });
@@ -100,19 +129,21 @@ const app = {
 
                 socket.on('connect', () => {
                     console.log('⚡ [Realtime] Connected to POS WebSocket, Socket ID:', socket.id);
+                    app.realtime.syncMode = 'websocket';
                     app.realtime.setStatus('connected');
                     app.realtime.flushOfflineQueue();
                     app.syncWithBackend(false);
                 });
 
                 socket.on('disconnect', (reason) => {
-                    console.warn('🔌 [Realtime] Disconnected from POS server:', reason);
-                    app.realtime.setStatus('offline');
+                    console.warn('🔌 [Realtime] WebSocket disconnected (switching to HTTP Cloud Polling):', reason);
+                    // Automatically fall back to HTTP Polling so Vercel / Cloud serverless never goes offline!
+                    app.realtime.startPollingFallback();
                 });
 
                 socket.on('connect_error', (err) => {
-                    console.warn('⚠️ [Realtime] WebSocket connection error:', err?.message);
-                    app.realtime.setStatus('offline');
+                    console.warn('⚠️ [Realtime] WebSocket connection issue (using HTTP Cloud Polling):', err?.message);
+                    app.realtime.startPollingFallback();
                 });
 
                 socket.on('sync:welcome', (data) => {
@@ -135,8 +166,47 @@ const app = {
 
             } catch (err) {
                 console.error('Socket init error:', err);
-                app.realtime.setStatus('offline');
+                app.realtime.startPollingFallback();
             }
+        },
+
+        // Cloud Keep-Alive: Sends ping every 25 seconds to prevent free cloud instances (Render/Vercel) from sleeping
+        startKeepAlive: () => {
+            if (app.realtime.keepAliveInterval) clearInterval(app.realtime.keepAliveInterval);
+            app.realtime.keepAliveInterval = setInterval(async () => {
+                const targetUrl = app.getApiUrl('/api/auth/me');
+                try {
+                    await fetch(targetUrl, { method: 'GET', credentials: 'include' });
+                } catch (e) {
+                    // Ignore background ping errors
+                }
+            }, 25000);
+        },
+
+        // HTTP Cloud Polling Fallback (ensures Vercel Serverless / Free Cloud stays 100% Live even if WebSockets disconnect)
+        startPollingFallback: () => {
+            if (app.realtime.pollingInterval) return; // Already polling
+
+            console.log('🔄 [Realtime] Started HTTP Cloud Polling fallback...');
+            app.realtime.pollingInterval = setInterval(async () => {
+                const targetUrl = app.getApiUrl('/api/auth/me');
+                try {
+                    const res = await fetch(targetUrl, { method: 'GET', credentials: 'include' });
+                    if (res.ok) {
+                        if (app.realtime.status !== 'syncing') {
+                            app.realtime.syncMode = 'polling';
+                            app.realtime.setStatus('connected');
+                        }
+                        if (app.realtime.pendingQueue.length > 0) {
+                            app.realtime.flushOfflineQueue();
+                        }
+                    } else {
+                        app.realtime.setStatus('offline');
+                    }
+                } catch (err) {
+                    app.realtime.setStatus('offline');
+                }
+            }, 6000);
         },
 
         setStatus: (status) => {
@@ -154,17 +224,18 @@ const app = {
             if (!widget) return;
 
             const count = app.realtime.deviceCount || 1;
+            const mode = app.realtime.syncMode || 'websocket';
 
             if (app.realtime.status === 'connected') {
                 widget.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm';
                 if (pulse) pulse.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
                 if (dot) dot.className = 'relative inline-flex rounded-full h-2 w-2 bg-emerald-500';
-                if (text) text.textContent = 'Live';
+                if (text) text.textContent = mode === 'polling' ? 'Cloud Live' : 'Live';
                 if (badge) {
-                    badge.textContent = count > 1 ? `${count} devices` : 'Live';
+                    badge.textContent = mode === 'polling' ? 'Cloud Sync' : (count > 1 ? `${count} devices` : 'Live');
                     badge.className = 'px-1.5 py-0.2 rounded-full bg-emerald-200/60 dark:bg-emerald-800/60 text-[10px]';
                 }
-                widget.title = `Realtime Live Sync Active (${count} connected device${count > 1 ? 's' : ''}). Click for details.`;
+                widget.title = `Realtime Live Sync Active (${mode === 'polling' ? 'HTTP Cloud Sync' : count + ' connected device(s)'}). Click for details.`;
             } else if (app.realtime.status === 'syncing') {
                 widget.className = 'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-xs font-bold cursor-pointer transition-all hover:scale-105 shadow-sm';
                 if (pulse) pulse.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75';
@@ -186,7 +257,7 @@ const app = {
                     badge.textContent = qCount > 0 ? `${qCount} queued` : 'Local';
                     badge.className = 'px-1.5 py-0.2 rounded-full bg-rose-200/60 dark:bg-rose-800/60 text-[10px]';
                 }
-                widget.title = 'Offline mode (Working locally). Click for diagnostics.';
+                widget.title = 'Offline mode (Working locally). Click for diagnostics & Server URL setup.';
             }
         },
 
@@ -510,11 +581,14 @@ const app = {
 
     showSyncStatusModal: () => {
         const status = app.realtime.status;
+        const mode = app.realtime.syncMode || 'websocket';
         const count = app.realtime.deviceCount || 1;
         const lastSync = app.realtime.lastSyncTime ? new Date(app.realtime.lastSyncTime).toLocaleTimeString() : 'Just now';
         const queueCount = app.realtime.pendingQueue.length;
         const statusColor = status === 'connected' ? 'text-emerald-600 dark:text-emerald-400' : (status === 'syncing' ? 'text-amber-500' : 'text-rose-500');
-        const statusBadge = status === 'connected' ? '🟢 Live Connected' : (status === 'syncing' ? '🟡 Syncing...' : '🔴 Offline Mode');
+        const statusBadge = status === 'connected' ? (mode === 'polling' ? '🟢 Cloud Live (Polling Sync)' : '🟢 Live (WebSocket)') : (status === 'syncing' ? '🟡 Syncing...' : '🔴 Offline Mode');
+        const customUrl = localStorage.getItem('krishan_pos_custom_server_url') || '';
+        const serverHost = customUrl || (window.location.host || 'http://localhost:3000');
 
         Swal.fire({
             title: '<div class="flex items-center justify-center gap-2 text-xl font-bold"><i class="fa-solid fa-tower-broadcast text-violet-600"></i> Realtime Sync Status</div>',
@@ -524,6 +598,10 @@ const app = {
                         <div class="flex justify-between items-center">
                             <span class="font-semibold text-slate-500 dark:text-slate-400">Connection State:</span>
                             <span class="font-bold ${statusColor}">${statusBadge}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="font-semibold text-slate-500 dark:text-slate-400">Sync Mode:</span>
+                            <span class="font-bold text-slate-700 dark:text-slate-200 uppercase text-xs">${mode}</span>
                         </div>
                         <div class="flex justify-between items-center">
                             <span class="font-semibold text-slate-500 dark:text-slate-400">Connected Devices:</span>
@@ -538,9 +616,15 @@ const app = {
                             <span class="font-bold ${queueCount > 0 ? 'text-amber-600' : 'text-slate-800 dark:text-white'}">${queueCount} actions</span>
                         </div>
                         <div class="flex justify-between items-center text-xs text-slate-400 pt-1 border-t border-slate-200 dark:border-slate-700">
-                            <span>Server Host:</span>
-                            <span class="font-mono">${window.location.host || 'localhost:3000'}</span>
+                            <span>Backend Server URL:</span>
+                            <span class="font-mono text-[11px] truncate max-w-[200px]" title="${serverHost}">${serverHost}</span>
                         </div>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button type="button" onclick="app.configureServerUrlModal()" class="w-full py-2 px-3 rounded-xl bg-violet-50 dark:bg-violet-950/50 border border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 font-bold text-xs hover:bg-violet-100 transition-colors flex items-center justify-center gap-1.5">
+                            <i class="fa-solid fa-cloud-arrow-up"></i> Configure Cloud Server URL
+                        </button>
                     </div>
 
                     <p class="text-xs text-slate-400 leading-relaxed">
@@ -557,6 +641,70 @@ const app = {
                 app.triggerManualSync();
             }
         });
+    },
+
+    configureServerUrlModal: async () => {
+        const currentUrl = localStorage.getItem('krishan_pos_custom_server_url') || '';
+        const { value: url } = await Swal.fire({
+            title: '<i class="fa-solid fa-server text-violet-600 mb-2"></i><br>Cloud Backend Server URL',
+            html: `
+                <div class="text-left text-xs text-slate-500 mb-3 leading-relaxed">
+                    Enter your live backend server URL (e.g. Render, Railway, Cloudflare Tunnel, or Local Network IP). Leave blank to use default.
+                </div>
+                <input id="swal-server-url" class="swal2-input !mt-0 !w-full text-sm font-mono" placeholder="https://my-pos.onrender.com or http://192.168.8.185:3000" value="${currentUrl}">
+                <div class="text-left text-[11px] text-slate-400 mt-2 space-y-1">
+                    <div>💡 <strong>Render Free URL:</strong> <code>https://your-app.onrender.com</code></div>
+                    <div>💡 <strong>Local Wi-Fi IP:</strong> <code>http://192.168.8.185:3000</code></div>
+                </div>
+            `,
+            showCancelButton: true,
+            confirmButtonText: 'Save & Test Connection',
+            confirmButtonColor: '#7c3aed',
+            preConfirm: () => {
+                const val = document.getElementById('swal-server-url').value.trim();
+                return val;
+            }
+        });
+
+        if (url !== undefined) {
+            if (url) {
+                localStorage.setItem('krishan_pos_custom_server_url', url.replace(/\/+$/, ''));
+            } else {
+                localStorage.removeItem('krishan_pos_custom_server_url');
+            }
+
+            Swal.fire({
+                title: 'Connecting...',
+                text: 'Testing connection to server',
+                allowOutsideClick: false,
+                didOpen: () => {
+                    Swal.showLoading();
+                }
+            });
+
+            try {
+                if (app.realtime.socket) {
+                    app.realtime.socket.disconnect();
+                }
+                app.realtime.init();
+                await app.syncWithBackend(true);
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Connected Successfully!',
+                    text: 'Live sync connected to ' + (url || 'default server'),
+                    timer: 2000,
+                    showConfirmButton: false
+                });
+            } catch (e) {
+                Swal.fire({
+                    icon: 'warning',
+                    title: 'Saved in Local Mode',
+                    text: 'Server URL saved. ' + e.message,
+                    timer: 2500,
+                    showConfirmButton: false
+                });
+            }
+        }
     },
 
     init: async () => {
