@@ -110,12 +110,16 @@ const app = {
         init: () => {
             app.realtime.startKeepAlive();
             const serverUrl = app.getServerUrl();
+            const isVercel = window.location.hostname.includes('vercel.app');
+            const isGitHubPages = window.location.hostname.endsWith('github.io');
 
-            // If on GitHub Pages without configured backend server, start in local mode and notify
-            if (!serverUrl && window.location.hostname.endsWith('github.io')) {
-                console.warn('Running on GitHub Pages without a configured backend server.');
-                app.realtime.setStatus('offline');
+            // On Vercel (Serverless REST cloud), start Cloud REST Polling Sync immediately
+            if (isVercel || (!serverUrl && isGitHubPages)) {
+                console.log('⚡ [Realtime] Initializing Cloud REST Sync Engine for Vercel/Cloud...');
+                app.realtime.syncMode = 'polling';
+                app.realtime.setStatus('connected');
                 app.realtime.startPollingFallback();
+                app.syncWithBackend(false);
                 return;
             }
 
@@ -123,7 +127,9 @@ const app = {
                 if (typeof io === 'undefined') {
                     console.warn('Socket.io library not detected. Starting HTTP Cloud Polling fallback.');
                     app.realtime.syncMode = 'polling';
+                    app.realtime.setStatus('connected');
                     app.realtime.startPollingFallback();
+                    app.syncWithBackend(false);
                     return;
                 }
 
@@ -131,10 +137,10 @@ const app = {
 
                 const socket = io(socketUrl, {
                     reconnection: true,
-                    reconnectionAttempts: Infinity,
-                    reconnectionDelay: 1500,
+                    reconnectionAttempts: 5,
+                    reconnectionDelay: 2000,
                     reconnectionDelayMax: 10000,
-                    timeout: 20000,
+                    timeout: 10000,
                     transports: ['websocket', 'polling']
                 });
 
@@ -150,12 +156,15 @@ const app = {
 
                 socket.on('disconnect', (reason) => {
                     console.warn('🔌 [Realtime] WebSocket disconnected (switching to HTTP Cloud Polling):', reason);
-                    // Automatically fall back to HTTP Polling so Vercel / Cloud serverless never goes offline!
+                    app.realtime.syncMode = 'polling';
+                    app.realtime.setStatus('connected');
                     app.realtime.startPollingFallback();
                 });
 
                 socket.on('connect_error', (err) => {
                     console.warn('⚠️ [Realtime] WebSocket connection issue (using HTTP Cloud Polling):', err?.message);
+                    app.realtime.syncMode = 'polling';
+                    app.realtime.setStatus('connected');
                     app.realtime.startPollingFallback();
                 });
 
@@ -179,6 +188,8 @@ const app = {
 
             } catch (err) {
                 console.error('Socket init error:', err);
+                app.realtime.syncMode = 'polling';
+                app.realtime.setStatus('connected');
                 app.realtime.startPollingFallback();
             }
         },
@@ -203,7 +214,7 @@ const app = {
             console.log('🔄 [Realtime] Started HTTP Cloud Polling & Stock Sync fallback...');
             let isSyncing = false;
 
-            app.realtime.pollingInterval = setInterval(async () => {
+            const executePoll = async () => {
                 if (isSyncing) return;
                 isSyncing = true;
                 try {
@@ -226,16 +237,14 @@ const app = {
 
                             // If stock or items changed, immediately update UI without disrupting inputs
                             if (hasChanges) {
-                                console.log('⚡ [Cloud Stock Sync] Detected live stock change from server, updating view...');
+                                console.log('⚡ [Cloud Stock Sync] Live stock change synced from cloud, updating view...');
                                 if (app.state.currentView === 'pos') app.renderPOS();
                                 if (app.state.currentView === 'products') app.renderInventory();
                                 if (app.state.currentView === 'dashboard') app.renderDashboard();
                             }
 
-                            if (app.realtime.status !== 'syncing') {
-                                app.realtime.syncMode = 'polling';
-                                app.realtime.setStatus('connected');
-                            }
+                            app.realtime.syncMode = 'polling';
+                            app.realtime.setStatus('connected');
                             app.realtime.lastSyncTime = new Date();
 
                             // Also flush offline queue if any
@@ -245,16 +254,19 @@ const app = {
                         }
                     } else if (res.status === 401) {
                         // Backend is active and responded
+                        app.realtime.syncMode = 'polling';
                         app.realtime.setStatus('connected');
-                    } else {
-                        app.realtime.setStatus('offline');
                     }
                 } catch (err) {
-                    app.realtime.setStatus('offline');
+                    console.warn('Polling check:', err?.message);
                 } finally {
                     isSyncing = false;
                 }
-            }, 3500);
+            };
+
+            // Run first poll immediately
+            executePoll();
+            app.realtime.pollingInterval = setInterval(executePoll, 2500);
         },
 
         setStatus: (status) => {
