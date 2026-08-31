@@ -160,10 +160,11 @@ app.post('/api/auth/login', async (req, res) => {
         const payload = { id: user.id, username: user.username, role: user.role, name: user.name };
         const token = createToken(payload);
 
+        const isHttps = Boolean(req.secure || req.headers['x-forwarded-proto'] === 'https' || isServerless);
         res.cookie('pos_token', token, {
             httpOnly: true,
-            sameSite: 'lax',
-            secure: false,
+            sameSite: isHttps ? 'none' : 'lax',
+            secure: isHttps,
             maxAge: SESSION_DURATION
         });
 

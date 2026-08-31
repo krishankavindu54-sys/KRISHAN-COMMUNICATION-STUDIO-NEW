@@ -81,6 +81,19 @@ const app = {
         return cleanPath;
     },
 
+    getAuthHeaders: (customHeaders = {}) => {
+        const headers = { 'Content-Type': 'application/json', ...customHeaders };
+        const token = localStorage.getItem('pos_token');
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+        const socketId = app.realtime?.getSocketId?.();
+        if (socketId) {
+            headers['x-socket-id'] = socketId;
+        }
+        return headers;
+    },
+
     currentUser: null,
 
     // Realtime Multi-Device Sync Engine (Socket.io + HTTP Polling Fallback + IndexedDB)
@@ -176,7 +189,7 @@ const app = {
             app.realtime.keepAliveInterval = setInterval(async () => {
                 const targetUrl = app.getApiUrl('/api/auth/me');
                 try {
-                    await fetch(targetUrl, { method: 'GET', credentials: 'include' });
+                    await fetch(targetUrl, { method: 'GET', headers: app.getAuthHeaders(), credentials: 'include' });
                 } catch (e) {
                     // Ignore background ping errors
                 }
@@ -195,7 +208,7 @@ const app = {
                 isSyncing = true;
                 try {
                     const targetUrl = app.getApiUrl('/api/items');
-                    const res = await fetch(targetUrl, { method: 'GET', credentials: 'include' });
+                    const res = await fetch(targetUrl, { method: 'GET', headers: app.getAuthHeaders(), credentials: 'include' });
                     if (res.ok) {
                         const serverItems = await res.json();
                         if (Array.isArray(serverItems)) {
@@ -231,7 +244,7 @@ const app = {
                             }
                         }
                     } else if (res.status === 401) {
-                        // Auth check
+                        // Backend is active and responded
                         app.realtime.setStatus('connected');
                     } else {
                         app.realtime.setStatus('offline');
@@ -320,7 +333,7 @@ const app = {
             try {
                 const res = await fetch(app.getApiUrl('/api/sync/batch'), {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: app.getAuthHeaders(),
                     credentials: 'include',
                     body: JSON.stringify({ operations: app.realtime.pendingQueue })
                 });
@@ -552,11 +565,7 @@ const app = {
     // Unified socket-aware API Caller with offline fallback
     apiCall: async (path, method = 'GET', data = null, offlineAction = null, offlineId = null) => {
         const url = app.getApiUrl(path);
-        const headers = { 'Content-Type': 'application/json' };
-        const socketId = app.realtime.getSocketId();
-        if (socketId) {
-            headers['x-socket-id'] = socketId;
-        }
+        const headers = app.getAuthHeaders();
 
         const options = {
             method,
@@ -580,6 +589,79 @@ const app = {
                 app.realtime.queueOfflineMutation(offlineAction, offlineId, data);
             }
             return null;
+        }
+    },
+
+    // Full Backend Synchronization
+    syncWithBackend: async (refreshView = false) => {
+        try {
+            const res = await fetch(app.getApiUrl('/api/sync/full'), {
+                method: 'GET',
+                headers: app.getAuthHeaders(),
+                credentials: 'include'
+            });
+            if (!res.ok) return false;
+            const payload = await res.json();
+            if (!payload || !payload.success || !payload.data) return false;
+
+            const data = payload.data;
+
+            if (Array.isArray(data.items) && data.items.length > 0) {
+                await db.items.clear();
+                await db.items.bulkPut(data.items);
+            }
+            if (Array.isArray(data.sales)) {
+                await db.sales.clear();
+                if (data.sales.length > 0) await db.sales.bulkPut(data.sales);
+            }
+            if (Array.isArray(data.repairs)) {
+                await db.repairs.clear();
+                if (data.repairs.length > 0) await db.repairs.bulkPut(data.repairs);
+            }
+            if (Array.isArray(data.expenses)) {
+                await db.expenses.clear();
+                if (data.expenses.length > 0) await db.expenses.bulkPut(data.expenses);
+            }
+            if (Array.isArray(data.creditors)) {
+                await db.creditors.clear();
+                if (data.creditors.length > 0) await db.creditors.bulkPut(data.creditors);
+            }
+            if (Array.isArray(data.bankTransactions)) {
+                await db.bankTransactions.clear();
+                if (data.bankTransactions.length > 0) await db.bankTransactions.bulkPut(data.bankTransactions);
+            }
+            if (Array.isArray(data.suppliers)) {
+                await db.suppliers.clear();
+                if (data.suppliers.length > 0) await db.suppliers.bulkPut(data.suppliers);
+            }
+            if (Array.isArray(data.purchaseBills)) {
+                await db.purchaseBills.clear();
+                if (data.purchaseBills.length > 0) await db.purchaseBills.bulkPut(data.purchaseBills);
+            }
+            if (data.settings) {
+                for (const k in data.settings) {
+                    localStorage.setItem(`krishan_pos_${k}`, data.settings[k]);
+                }
+                app.updateShopProfileHeader();
+            }
+
+            app.realtime.lastSyncTime = new Date();
+
+            if (refreshView) {
+                if (app.state.currentView === 'dashboard') app.renderDashboard();
+                else if (app.state.currentView === 'pos') app.renderPOS();
+                else if (app.state.currentView === 'products') app.renderInventory();
+                else if (app.state.currentView === 'sales') app.renderSalesHistory();
+                else if (app.state.currentView === 'repairs') app.renderRepairs();
+                else if (app.state.currentView === 'credits') app.renderCredits();
+                else if (app.state.currentView === 'expenses') app.renderExpenses();
+                else if (app.state.currentView === 'suppliers') app.renderSuppliers();
+                else if (app.state.currentView === 'bank') app.renderBankTracker();
+            }
+            return true;
+        } catch (e) {
+            console.warn('Backend full sync error:', e.message);
+            return false;
         }
     },
 
@@ -899,6 +981,9 @@ const app = {
                 const data = await res.json().catch(() => ({}));
                 if (res.ok && data.success) {
                     user = data.user;
+                    if (data.token) {
+                        localStorage.setItem('pos_token', data.token);
+                    }
                 }
             } catch (err) {
                 // Backend offline
@@ -954,7 +1039,11 @@ const app = {
 
     checkAuth: async () => {
         try {
-            const res = await fetch(app.getApiUrl('/api/auth/me'), { credentials: 'include' });
+            const res = await fetch(app.getApiUrl('/api/auth/me'), {
+                method: 'GET',
+                headers: app.getAuthHeaders(),
+                credentials: 'include'
+            });
             if (res.ok) {
                 const data = await res.json();
                 if (data && data.authenticated && data.user) {

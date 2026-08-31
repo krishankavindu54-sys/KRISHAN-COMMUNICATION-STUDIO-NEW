@@ -230,6 +230,9 @@
 
                     if (res.ok && data.success) {
                         authenticatedUser = data.user;
+                        if (data.token) {
+                            localStorage.setItem('pos_token', data.token);
+                        }
                         backendSuccess = true;
                     } else if (res.status === 400 || res.status === 401) {
                         throw new Error(data.message || 'Invalid username or password.');
