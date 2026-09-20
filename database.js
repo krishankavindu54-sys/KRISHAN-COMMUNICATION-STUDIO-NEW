@@ -1,8 +1,30 @@
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
+require('dotenv').config();
 
-// Serverless / Read-Only File System Detection (Vercel, AWS Lambda, Cloud)
+// ──────────────────────────────────────────────
+// SUPABASE CLOUD DATABASE CONFIGURATION (100% Free Cloud DB)
+// ──────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+        const { createClient } = require('@supabase/supabase-js');
+        supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+            auth: { persistSession: false }
+        });
+        console.log('⚡ [Cloud DB] Connected to Supabase Cloud Database:', SUPABASE_URL);
+    } catch (err) {
+        console.warn('⚠️ [Cloud DB] Could not initialize Supabase client:', err.message);
+    }
+}
+
+// ──────────────────────────────────────────────
+// LOCAL SQLITE / JSON FALLBACK STORAGE
+// ──────────────────────────────────────────────
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
 
 let DATA_DIR;
@@ -17,7 +39,6 @@ try {
         fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 } catch (err) {
-    console.warn('Could not create standard DATA_DIR, falling back to /tmp:', err.message);
     DATA_DIR = '/tmp';
 }
 
@@ -28,10 +49,9 @@ try {
     const { DatabaseSync } = require('node:sqlite');
     db = new DatabaseSync(DB_PATH);
 } catch (err) {
-    // Fallback in case of environment limitation
+    // Fallback if sqlite module isn't available
 }
 
-// Fallback JSON-backed storage if node:sqlite isn't natively accessible in specific runtime
 class JsonDatabase {
     constructor(filePath) {
         this.filePath = filePath.replace('.sqlite', '.json');
@@ -73,10 +93,9 @@ class JsonDatabase {
 
 const jsonDb = !db ? new JsonDatabase(DB_PATH) : null;
 
-// Initialize Database Tables
+// Initialize Database Tables for Local Mode
 function initDatabase() {
     if (db) {
-        // SQLite Tables
         db.exec(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,24 +118,12 @@ function initDatabase() {
                 min_stock INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE TABLE IF NOT EXISTS repairs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_name TEXT NOT NULL,
-                phone_model TEXT NOT NULL,
-                issue TEXT,
-                estimated_cost REAL DEFAULT 0,
-                advance_payment REAL DEFAULT 0,
-                status TEXT DEFAULT 'pending',
-                contact TEXT,
-                created_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS sales (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 total REAL NOT NULL,
                 discount REAL DEFAULT 0,
-                payment_method TEXT DEFAULT 'cash',
+                payment_method TEXT NOT NULL DEFAULT 'cash',
                 cash_received REAL DEFAULT 0,
                 change_amount REAL DEFAULT 0,
                 items_json TEXT NOT NULL,
@@ -124,6 +131,18 @@ function initDatabase() {
                 customer_phone TEXT,
                 user_id INTEGER,
                 is_utility INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS repairs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_name TEXT NOT NULL,
+                phone_model TEXT NOT NULL,
+                issue TEXT,
+                estimated_cost REAL DEFAULT 0,
+                advance_payment REAL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                contact TEXT,
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS expenses (
@@ -156,6 +175,7 @@ function initDatabase() {
                 name TEXT NOT NULL,
                 company TEXT,
                 phone TEXT,
+                email TEXT,
                 address TEXT
             );
 
@@ -163,9 +183,10 @@ function initDatabase() {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 supplier_id INTEGER,
                 supplier_name TEXT,
+                bill_number TEXT,
                 date TEXT NOT NULL,
-                total REAL NOT NULL DEFAULT 0,
-                status TEXT DEFAULT 'pending',
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
                 items_json TEXT
             );
 
@@ -175,124 +196,206 @@ function initDatabase() {
             );
         `);
 
-        // Seed default admin user if not exists
-        const adminCheck = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
-        if (!adminCheck) {
-            const passwordHash = bcrypt.hashSync('admin123', 10);
-            db.prepare(`
-                INSERT INTO users (username, password_hash, role, name, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            `).run('admin', passwordHash, 'admin', 'Administrator', new Date().toISOString());
-            console.log('✅ Default Admin created: username=admin, password=admin123');
+        // Seed default users if empty
+        const count = db.prepare('SELECT count(*) as count FROM users').get().count;
+        if (count === 0) {
+            const adminHash = bcrypt.hashSync('admin123', 10);
+            const cashierHash = bcrypt.hashSync('cashier123', 10);
+            const stmt = db.prepare('INSERT INTO users (username, password_hash, role, name, created_at) VALUES (?, ?, ?, ?, ?)');
+            stmt.run('admin', adminHash, 'admin', 'Administrator', new Date().toISOString());
+            stmt.run('cashier', cashierHash, 'cashier', 'Cashier', new Date().toISOString());
         }
 
-        // Seed sample items if empty
-        const countRow = db.prepare('SELECT COUNT(*) as count FROM items').get();
-        if (countRow.count === 0) {
-            const insertItem = db.prepare(`
-                INSERT INTO items (name, category, type, price, cost, barcode, stock, min_stock)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-            insertItem.run("Photocopy (A4)", "Service", "service", 10, 2, "SERV001", 0, 0);
-            insertItem.run("Passport Photo", "Studio", "service", 350, 50, "SERV002", 0, 0);
-            insertItem.run("Tempered Glass", "Accessories", "product", 500, 150, "ACC001", 25, 5);
-            insertItem.run("CR Books", "Stationery", "product", 250, 180, "STAT001", 50, 10);
-            console.log('✅ Default sample items created in database.');
+        // Seed initial items if empty
+        const itemCount = db.prepare('SELECT count(*) as count FROM items').get().count;
+        if (itemCount === 0) {
+            const stmt = db.prepare('INSERT INTO items (name, category, type, price, cost, barcode, stock, min_stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+            stmt.run('Photocopy (A4)', 'Service', 'service', 10, 2, 'SERV001', 0, 0);
+            stmt.run('Passport Photo', 'Studio', 'service', 350, 50, 'SERV002', 0, 0);
+            stmt.run('Tempered Glass', 'Accessories', 'product', 500, 150, 'ACC001', 25, 5);
+            stmt.run('CR Books', 'Stationery', 'product', 250, 180, 'STAT001', 50, 10);
         }
-
-        // Seed default shop settings if not exist
-        const setStmt = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
-        setStmt.run('shop_name', 'Krishan Communication & Studio');
-        setStmt.run('owner_name', 'Krishan Kavindu');
-        setStmt.run('phone', '076 928 1880 / 071 759 7335');
-        setStmt.run('address', 'Hatharamanhandiya, Mapalassa, Sooriyawewa');
     } else if (jsonDb) {
-        // Fallback JSON seed
-        if (!jsonDb.data.users.find(u => u.username === 'admin')) {
-            jsonDb.data.users.push({
-                id: 1,
-                username: 'admin',
-                password_hash: bcrypt.hashSync('admin123', 10),
-                role: 'admin',
-                name: 'Administrator',
-                created_at: new Date().toISOString()
-            });
+        if (jsonDb.data.users.length === 0) {
+            jsonDb.data.users.push(
+                { id: 1, username: 'admin', password_hash: bcrypt.hashSync('admin123', 10), role: 'admin', name: 'Administrator', created_at: new Date().toISOString() },
+                { id: 2, username: 'cashier', password_hash: bcrypt.hashSync('cashier123', 10), role: 'cashier', name: 'Cashier', created_at: new Date().toISOString() }
+            );
             jsonDb.save();
-            console.log('✅ Default Admin created in JSON store: username=admin, password=admin123');
         }
         if (jsonDb.data.items.length === 0) {
-            jsonDb.data.items = [
-                { id: 1, name: "Photocopy (A4)", category: "Service", type: "service", price: 10, cost: 2, barcode: "SERV001", stock: 0, min_stock: 0 },
-                { id: 2, name: "Passport Photo", category: "Studio", type: "service", price: 350, cost: 50, barcode: "SERV002", stock: 0, min_stock: 0 },
-                { id: 3, name: "Tempered Glass", category: "Accessories", type: "product", price: 500, cost: 150, barcode: "ACC001", stock: 25, min_stock: 5 },
-                { id: 4, name: "CR Books", category: "Stationery", type: "product", price: 250, cost: 180, barcode: "STAT001", stock: 50, min_stock: 10 }
-            ];
+            jsonDb.data.items.push(
+                { id: 1, name: "Photocopy (A4)", category: "Service", type: "service", price: 10, cost: 2, barcode: "SERV001", stock: 0, minStock: 0 },
+                { id: 2, name: "Passport Photo", category: "Studio", type: "service", price: 350, cost: 50, barcode: "SERV002", stock: 0, minStock: 0 },
+                { id: 3, name: "Tempered Glass", category: "Accessories", type: "product", price: 500, cost: 150, barcode: "ACC001", stock: 25, minStock: 5 },
+                { id: 4, name: "CR Books", category: "Stationery", type: "product", price: 250, cost: 180, barcode: "STAT001", stock: 50, minStock: 10 }
+            );
             jsonDb.save();
         }
     }
 }
 
-// Data Access Layer Object
+// Helper formatting functions
+function formatItem(row) {
+    if (!row) return null;
+    return {
+        id: Number(row.id),
+        name: row.name,
+        barcode: row.barcode || '',
+        category: row.category || 'General',
+        type: row.type || 'product',
+        price: Number(row.price || 0),
+        cost: Number(row.cost || 0),
+        stock: Number(row.stock || 0),
+        minStock: Number(row.min_stock !== undefined ? row.min_stock : (row.minStock || 0))
+    };
+}
+
+function formatSale(row) {
+    if (!row) return null;
+    let items = [];
+    try {
+        items = typeof row.items_json === 'string' ? JSON.parse(row.items_json) : (row.items_json || row.items || []);
+    } catch(e) {}
+    return {
+        id: Number(row.id),
+        date: row.date,
+        total: Number(row.total || 0),
+        discount: Number(row.discount || 0),
+        paymentMethod: row.payment_method || row.paymentMethod || 'cash',
+        cashReceived: Number(row.cash_received !== undefined ? row.cash_received : (row.cashReceived || 0)),
+        change: Number(row.change_amount !== undefined ? row.change_amount : (row.change || 0)),
+        items,
+        customerName: row.customer_name || row.customerName || '',
+        customerPhone: row.customer_phone || row.customerPhone || '',
+        userId: row.user_id || row.userId || null,
+        isUtility: Boolean(row.is_utility || row.isUtility)
+    };
+}
+
+function formatRepair(row) {
+    if (!row) return null;
+    return {
+        id: Number(row.id),
+        customerName: row.customer_name || row.customerName || '',
+        phoneModel: row.phone_model || row.phoneModel || '',
+        issue: row.issue || '',
+        estimatedCost: Number(row.estimated_cost !== undefined ? row.estimated_cost : (row.estimatedCost || 0)),
+        advancePayment: Number(row.advance_payment !== undefined ? row.advance_payment : (row.advancePayment || 0)),
+        status: row.status || 'pending',
+        contact: row.contact || '',
+        createdAt: row.created_at || row.createdAt || new Date().toISOString()
+    };
+}
+
+function formatPurchaseBill(row) {
+    if (!row) return null;
+    let items = [];
+    try {
+        items = typeof row.items_json === 'string' ? JSON.parse(row.items_json) : (row.items_json || row.items || []);
+    } catch(e) {}
+    return {
+        id: Number(row.id),
+        supplierId: row.supplier_id || row.supplierId || null,
+        supplierName: row.supplier_name || row.supplierName || '',
+        billNumber: row.bill_number || row.billNumber || '',
+        date: row.date || new Date().toISOString(),
+        totalAmount: Number(row.total_amount !== undefined ? row.total_amount : (row.totalAmount || 0)),
+        status: row.status || 'pending',
+        items
+    };
+}
+
+// ──────────────────────────────────────────────
+// UNIVERSAL DATABASE SERVICE (SUPABASE + SQLITE / JSON)
+// ──────────────────────────────────────────────
 const dbService = {
+    isCloudDB: () => Boolean(supabase),
+
     // USERS
-    getUsers: () => {
-        if (db) {
-            return db.prepare('SELECT id, username, role, name, created_at FROM users ORDER BY id ASC').all();
+    getUsers: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('users').select('id, username, role, name, created_at').order('id', { ascending: true });
+            return (data || []).map(u => ({ id: u.id, username: u.username, role: u.role, name: u.name, createdAt: u.created_at }));
         }
-        return jsonDb.data.users.map(({ password_hash, ...u }) => u);
-    },
-    getUserByUsername: (username) => {
         if (db) {
-            return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+            return db.prepare('SELECT id, username, role, name, created_at as createdAt FROM users ORDER BY id ASC').all();
         }
-        return jsonDb.data.users.find(u => u.username.toLowerCase() === username.toLowerCase());
+        return jsonDb.data.users.map(u => ({ id: u.id, username: u.username, role: u.role, name: u.name, createdAt: u.created_at }));
     },
-    getUserById: (id) => {
-        if (db) {
-            return db.prepare('SELECT id, username, role, name, created_at FROM users WHERE id = ?').get(id);
+
+    getUserByUsername: async (username) => {
+        if (supabase) {
+            const { data } = await supabase.from('users').select('*').ilike('username', username.trim()).maybeSingle();
+            return data;
         }
-        const u = jsonDb.data.users.find(x => x.id === Number(id));
-        if (!u) return null;
-        const { password_hash, ...rest } = u;
-        return rest;
-    },
-    createUser: ({ username, password, role, name }) => {
-        const password_hash = bcrypt.hashSync(password, 10);
-        const created_at = new Date().toISOString();
         if (db) {
-            const stmt = db.prepare(`
-                INSERT INTO users (username, password_hash, role, name, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            `);
-            const res = stmt.run(username.trim(), password_hash, role || 'cashier', name.trim(), created_at);
-            return { id: Number(res.lastInsertRowid), username, role, name, created_at };
+            return db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username.trim());
+        }
+        return jsonDb.data.users.find(u => u.username.toLowerCase() === username.trim().toLowerCase()) || null;
+    },
+
+    createUser: async (user) => {
+        const hash = user.password_hash || bcrypt.hashSync(user.password || 'admin123', 10);
+        if (supabase) {
+            const { data, error } = await supabase.from('users').insert([{
+                username: user.username.trim(),
+                password_hash: hash,
+                role: user.role || 'cashier',
+                name: user.name,
+                created_at: new Date().toISOString()
+            }]).select('id, username, role, name, created_at').single();
+            if (error) throw new Error(error.message);
+            return data;
+        }
+        if (db) {
+            const stmt = db.prepare('INSERT INTO users (username, password_hash, role, name, created_at) VALUES (?, ?, ?, ?, ?)');
+            const res = stmt.run(user.username.trim(), hash, user.role || 'cashier', user.name, new Date().toISOString());
+            return { id: Number(res.lastInsertRowid), username: user.username, role: user.role, name: user.name };
         }
         const newId = jsonDb.data.users.length ? Math.max(...jsonDb.data.users.map(u => u.id)) + 1 : 1;
-        const newUser = { id: newId, username: username.trim(), password_hash, role: role || 'cashier', name: name.trim(), created_at };
+        const newUser = { id: newId, username: user.username, password_hash: hash, role: user.role || 'cashier', name: user.name, created_at: new Date().toISOString() };
         jsonDb.data.users.push(newUser);
         jsonDb.save();
-        const { password_hash: _, ...rest } = newUser;
-        return rest;
+        return { id: newId, username: newUser.username, role: newUser.role, name: newUser.name };
     },
-    updateUser: (id, { name, role, password }) => {
+
+    updateUser: async (id, data) => {
+        if (supabase) {
+            const updatePayload = {};
+            if (data.name) updatePayload.name = data.name;
+            if (data.role) updatePayload.role = data.role;
+            if (data.password) updatePayload.password_hash = bcrypt.hashSync(data.password, 10);
+            const { data: updated } = await supabase.from('users').update(updatePayload).eq('id', id).select('id, username, role, name').single();
+            return updated;
+        }
         if (db) {
-            if (password) {
-                const password_hash = bcrypt.hashSync(password, 10);
-                db.prepare('UPDATE users SET name = ?, role = ?, password_hash = ? WHERE id = ?').run(name, role, password_hash, id);
+            if (data.password) {
+                const hash = bcrypt.hashSync(data.password, 10);
+                db.prepare('UPDATE users SET name = COALESCE(?, name), role = COALESCE(?, role), password_hash = ? WHERE id = ?')
+                    .run(data.name || null, data.role || null, hash, id);
             } else {
-                db.prepare('UPDATE users SET name = ?, role = ? WHERE id = ?').run(name, role, id);
+                db.prepare('UPDATE users SET name = COALESCE(?, name), role = COALESCE(?, role) WHERE id = ?')
+                    .run(data.name || null, data.role || null, id);
             }
-            return dbService.getUserById(id);
+            return db.prepare('SELECT id, username, role, name FROM users WHERE id = ?').get(id);
         }
         const user = jsonDb.data.users.find(u => u.id === Number(id));
-        if (!user) return null;
-        if (name) user.name = name;
-        if (role) user.role = role;
-        if (password) user.password_hash = bcrypt.hashSync(password, 10);
-        jsonDb.save();
-        return dbService.getUserById(id);
+        if (user) {
+            if (data.name) user.name = data.name;
+            if (data.role) user.role = data.role;
+            if (data.password) user.password_hash = bcrypt.hashSync(data.password, 10);
+            jsonDb.save();
+            return { id: user.id, username: user.username, role: user.role, name: user.name };
+        }
+        return null;
     },
-    deleteUser: (id) => {
+
+    deleteUser: async (id) => {
+        if (supabase) {
+            await supabase.from('users').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM users WHERE id = ?').run(id);
             return true;
@@ -303,50 +406,138 @@ const dbService = {
     },
 
     // ITEMS / INVENTORY
-    getItems: () => {
-        if (db) {
-            return db.prepare('SELECT id, name, barcode, category, type, price, cost, stock, min_stock as minStock FROM items ORDER BY id DESC').all();
+    getItems: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('items').select('*').order('id', { ascending: false });
+            return (data || []).map(formatItem);
         }
-        return [...jsonDb.data.items].reverse();
-    },
-    getItemById: (id) => {
         if (db) {
-            return db.prepare('SELECT id, name, barcode, category, type, price, cost, stock, min_stock as minStock FROM items WHERE id = ?').get(id);
+            const rows = db.prepare('SELECT * FROM items ORDER BY id DESC').all();
+            return rows.map(formatItem);
         }
-        return jsonDb.data.items.find(i => i.id === Number(id));
+        return [...jsonDb.data.items].reverse().map(formatItem);
     },
-    createItem: (item) => {
+
+    getItemById: async (id) => {
+        if (supabase) {
+            const { data } = await supabase.from('items').select('*').eq('id', id).maybeSingle();
+            return formatItem(data);
+        }
+        if (db) {
+            const row = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
+            return formatItem(row);
+        }
+        const found = jsonDb.data.items.find(i => i.id === Number(id));
+        return formatItem(found);
+    },
+
+    createItem: async (item) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('items').insert([{
+                name: item.name,
+                barcode: item.barcode || '',
+                category: item.category || 'General',
+                type: item.type || 'product',
+                price: Number(item.price || 0),
+                cost: Number(item.cost || 0),
+                stock: Number(item.stock || 0),
+                min_stock: Number(item.minStock || item.min_stock || 0)
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return formatItem(data);
+        }
         if (db) {
             const stmt = db.prepare(`
                 INSERT INTO items (name, barcode, category, type, price, cost, stock, min_stock)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `);
-            const res = stmt.run(item.name, item.barcode || '', item.category || 'General', item.type || 'product', item.price || 0, item.cost || 0, item.stock || 0, item.minStock || 0);
-            return { id: Number(res.lastInsertRowid), ...item };
+            const res = stmt.run(
+                item.name,
+                item.barcode || '',
+                item.category || 'General',
+                item.type || 'product',
+                item.price || 0,
+                item.cost || 0,
+                item.stock || 0,
+                item.minStock || item.min_stock || 0
+            );
+            return dbService.getItemById(res.lastInsertRowid);
         }
         const newId = jsonDb.data.items.length ? Math.max(...jsonDb.data.items.map(i => i.id)) + 1 : 1;
         const newItem = { id: newId, ...item };
         jsonDb.data.items.push(newItem);
         jsonDb.save();
-        return newItem;
+        return formatItem(newItem);
     },
-    updateItem: (id, item) => {
+
+    updateItem: async (id, item) => {
+        if (supabase) {
+            const updatePayload = {};
+            if (item.name !== undefined) updatePayload.name = item.name;
+            if (item.barcode !== undefined) updatePayload.barcode = item.barcode;
+            if (item.category !== undefined) updatePayload.category = item.category;
+            if (item.type !== undefined) updatePayload.type = item.type;
+            if (item.price !== undefined) updatePayload.price = Number(item.price);
+            if (item.cost !== undefined) updatePayload.cost = Number(item.cost);
+            if (item.stock !== undefined) updatePayload.stock = Number(item.stock);
+            if (item.minStock !== undefined || item.min_stock !== undefined) {
+                updatePayload.min_stock = Number(item.minStock !== undefined ? item.minStock : item.min_stock);
+            }
+            const { data } = await supabase.from('items').update(updatePayload).eq('id', id).select().single();
+            return formatItem(data);
+        }
         if (db) {
             db.prepare(`
                 UPDATE items SET name = ?, barcode = ?, category = ?, type = ?, price = ?, cost = ?, stock = ?, min_stock = ?
                 WHERE id = ?
-            `).run(item.name, item.barcode || '', item.category, item.type, item.price, item.cost, item.stock, item.minStock || 0, id);
-            return { id: Number(id), ...item };
+            `).run(
+                item.name,
+                item.barcode || '',
+                item.category || 'General',
+                item.type || 'product',
+                item.price || 0,
+                item.cost || 0,
+                item.stock || 0,
+                item.minStock !== undefined ? item.minStock : (item.min_stock || 0),
+                id
+            );
+            return dbService.getItemById(id);
         }
         const idx = jsonDb.data.items.findIndex(i => i.id === Number(id));
         if (idx !== -1) {
             jsonDb.data.items[idx] = { ...jsonDb.data.items[idx], ...item };
             jsonDb.save();
-            return jsonDb.data.items[idx];
+            return formatItem(jsonDb.data.items[idx]);
         }
         return null;
     },
-    deleteItem: (id) => {
+
+    adjustItemStock: async (id, delta) => {
+        if (supabase) {
+            const current = await dbService.getItemById(id);
+            if (!current) return null;
+            const newStock = Math.max(0, current.stock + delta);
+            const { data } = await supabase.from('items').update({ stock: newStock }).eq('id', id).select().single();
+            return formatItem(data);
+        }
+        if (db) {
+            db.prepare('UPDATE items SET stock = MAX(0, stock + ?) WHERE id = ?').run(delta, id);
+            return dbService.getItemById(id);
+        }
+        const item = jsonDb.data.items.find(i => i.id === Number(id));
+        if (item) {
+            item.stock = Math.max(0, (item.stock || 0) + delta);
+            jsonDb.save();
+            return formatItem(item);
+        }
+        return null;
+    },
+
+    deleteItem: async (id) => {
+        if (supabase) {
+            await supabase.from('items').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM items WHERE id = ?').run(id);
             return true;
@@ -357,28 +548,47 @@ const dbService = {
     },
 
     // SALES
-    getSales: () => {
+    getSales: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('sales').select('*').order('id', { ascending: false });
+            return (data || []).map(formatSale);
+        }
         if (db) {
             const rows = db.prepare('SELECT * FROM sales ORDER BY id DESC').all();
-            return rows.map(r => ({
-                id: r.id,
-                date: r.date,
-                total: r.total,
-                discount: r.discount,
-                paymentMethod: r.payment_method,
-                cashReceived: r.cash_received,
-                change: r.change_amount,
-                items: JSON.parse(r.items_json || '[]'),
-                customerName: r.customer_name,
-                customerPhone: r.customer_phone,
-                userId: r.user_id,
-                isUtility: Boolean(r.is_utility)
-            }));
+            return rows.map(formatSale);
         }
-        return [...jsonDb.data.sales].reverse();
+        return [...jsonDb.data.sales].reverse().map(formatSale);
     },
-    createSale: (sale) => {
-        const itemsJson = JSON.stringify(sale.items || []);
+
+    createSale: async (sale) => {
+        const itemsJson = sale.items || [];
+        if (supabase) {
+            const { data, error } = await supabase.from('sales').insert([{
+                date: sale.date || new Date().toISOString(),
+                total: Number(sale.total || 0),
+                discount: Number(sale.discount || 0),
+                payment_method: sale.paymentMethod || 'cash',
+                cash_received: Number(sale.cashReceived || 0),
+                change_amount: Number(sale.change || 0),
+                items_json: itemsJson,
+                customer_name: sale.customerName || '',
+                customer_phone: sale.customerPhone || '',
+                user_id: sale.userId || null,
+                is_utility: Boolean(sale.isUtility)
+            }]).select().single();
+            if (error) throw new Error(error.message);
+
+            // Deduct stock
+            if (Array.isArray(itemsJson)) {
+                for (const item of itemsJson) {
+                    if (item.type === 'product' && item.id) {
+                        await dbService.adjustItemStock(item.id, -(item.qty || 1));
+                    }
+                }
+            }
+            return formatSale(data);
+        }
+
         if (db) {
             const stmt = db.prepare(`
                 INSERT INTO sales (date, total, discount, payment_method, cash_received, change_amount, items_json, customer_name, customer_phone, user_id, is_utility)
@@ -391,7 +601,7 @@ const dbService = {
                 sale.paymentMethod || 'cash',
                 sale.cashReceived || 0,
                 sale.change || 0,
-                itemsJson,
+                JSON.stringify(itemsJson),
                 sale.customerName || '',
                 sale.customerPhone || '',
                 sale.userId || null,
@@ -399,9 +609,9 @@ const dbService = {
             );
             const saleId = Number(res.lastInsertRowid);
 
-            // Deduct stock for inventory product items
-            if (sale.items && Array.isArray(sale.items)) {
-                for (const item of sale.items) {
+            // Deduct stock
+            if (Array.isArray(itemsJson)) {
+                for (const item of itemsJson) {
                     if (item.type === 'product' && item.id) {
                         db.prepare('UPDATE items SET stock = MAX(0, stock - ?) WHERE id = ?').run(item.qty || 1, item.id);
                     }
@@ -413,10 +623,8 @@ const dbService = {
         const newId = jsonDb.data.sales.length ? Math.max(...jsonDb.data.sales.map(s => s.id)) + 1 : 1;
         const newSale = { id: newId, ...sale };
         jsonDb.data.sales.push(newSale);
-
-        // Deduct stock
-        if (sale.items && Array.isArray(sale.items)) {
-            for (const item of sale.items) {
+        if (Array.isArray(itemsJson)) {
+            for (const item of itemsJson) {
                 if (item.type === 'product' && item.id) {
                     const found = jsonDb.data.items.find(i => i.id === item.id);
                     if (found) found.stock = Math.max(0, found.stock - (item.qty || 1));
@@ -424,9 +632,14 @@ const dbService = {
             }
         }
         jsonDb.save();
-        return newSale;
+        return formatSale(newSale);
     },
-    deleteSale: (id) => {
+
+    deleteSale: async (id) => {
+        if (supabase) {
+            await supabase.from('sales').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM sales WHERE id = ?').run(id);
             return true;
@@ -435,39 +648,35 @@ const dbService = {
         jsonDb.save();
         return true;
     },
-    adjustItemStock: (id, delta) => {
-        if (db) {
-            db.prepare('UPDATE items SET stock = MAX(0, stock + ?) WHERE id = ?').run(delta, id);
-            return dbService.getItemById(id);
-        }
-        const item = jsonDb.data.items.find(i => i.id === Number(id));
-        if (item) {
-            item.stock = Math.max(0, (item.stock || 0) + delta);
-            jsonDb.save();
-            return item;
-        }
-        return null;
-    },
 
     // REPAIRS
-    getRepairs: () => {
+    getRepairs: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('repairs').select('*').order('id', { ascending: false });
+            return (data || []).map(formatRepair);
+        }
         if (db) {
             const rows = db.prepare('SELECT * FROM repairs ORDER BY id DESC').all();
-            return rows.map(r => ({
-                id: r.id,
-                customerName: r.customer_name,
-                phoneModel: r.phone_model,
-                issue: r.issue,
-                estimatedCost: r.estimated_cost,
-                advancePayment: r.advance_payment,
-                status: r.status,
-                contact: r.contact,
-                createdAt: r.created_at
-            }));
+            return rows.map(formatRepair);
         }
-        return [...jsonDb.data.repairs].reverse();
+        return [...jsonDb.data.repairs].reverse().map(formatRepair);
     },
-    createRepair: (repair) => {
+
+    createRepair: async (repair) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('repairs').insert([{
+                customer_name: repair.customerName,
+                phone_model: repair.phoneModel,
+                issue: repair.issue || '',
+                estimated_cost: Number(repair.estimatedCost || 0),
+                advance_payment: Number(repair.advancePayment || 0),
+                status: repair.status || 'pending',
+                contact: repair.contact || '',
+                created_at: repair.createdAt || new Date().toISOString()
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return formatRepair(data);
+        }
         if (db) {
             const stmt = db.prepare(`
                 INSERT INTO repairs (customer_name, phone_model, issue, estimated_cost, advance_payment, status, contact, created_at)
@@ -489,9 +698,22 @@ const dbService = {
         const newRepair = { id: newId, ...repair };
         jsonDb.data.repairs.push(newRepair);
         jsonDb.save();
-        return newRepair;
+        return formatRepair(newRepair);
     },
-    updateRepair: (id, repair) => {
+
+    updateRepair: async (id, repair) => {
+        if (supabase) {
+            const updatePayload = {};
+            if (repair.customerName !== undefined) updatePayload.customer_name = repair.customerName;
+            if (repair.phoneModel !== undefined) updatePayload.phone_model = repair.phoneModel;
+            if (repair.issue !== undefined) updatePayload.issue = repair.issue;
+            if (repair.estimatedCost !== undefined) updatePayload.estimated_cost = Number(repair.estimatedCost);
+            if (repair.advancePayment !== undefined) updatePayload.advance_payment = Number(repair.advancePayment);
+            if (repair.status !== undefined) updatePayload.status = repair.status;
+            if (repair.contact !== undefined) updatePayload.contact = repair.contact;
+            const { data } = await supabase.from('repairs').update(updatePayload).eq('id', id).select().single();
+            return formatRepair(data);
+        }
         if (db) {
             db.prepare(`
                 UPDATE repairs SET customer_name = ?, phone_model = ?, issue = ?, estimated_cost = ?, advance_payment = ?, status = ?, contact = ?
@@ -503,11 +725,16 @@ const dbService = {
         if (idx !== -1) {
             jsonDb.data.repairs[idx] = { ...jsonDb.data.repairs[idx], ...repair };
             jsonDb.save();
-            return jsonDb.data.repairs[idx];
+            return formatRepair(jsonDb.data.repairs[idx]);
         }
         return null;
     },
-    deleteRepair: (id) => {
+
+    deleteRepair: async (id) => {
+        if (supabase) {
+            await supabase.from('repairs').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM repairs WHERE id = ?').run(id);
             return true;
@@ -518,13 +745,28 @@ const dbService = {
     },
 
     // EXPENSES
-    getExpenses: () => {
+    getExpenses: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('expenses').select('*').order('id', { ascending: false });
+            return (data || []).map(e => ({ id: e.id, date: e.date, category: e.category, amount: Number(e.amount), description: e.description || '' }));
+        }
         if (db) {
             return db.prepare('SELECT * FROM expenses ORDER BY id DESC').all();
         }
         return [...jsonDb.data.expenses].reverse();
     },
-    createExpense: (expense) => {
+
+    createExpense: async (expense) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('expenses').insert([{
+                date: expense.date || new Date().toISOString(),
+                category: expense.category,
+                amount: Number(expense.amount || 0),
+                description: expense.description || ''
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return { id: data.id, date: data.date, category: data.category, amount: Number(data.amount), description: data.description };
+        }
         if (db) {
             const stmt = db.prepare('INSERT INTO expenses (date, category, amount, description) VALUES (?, ?, ?, ?)');
             const res = stmt.run(expense.date || new Date().toISOString(), expense.category, expense.amount, expense.description || '');
@@ -536,7 +778,12 @@ const dbService = {
         jsonDb.save();
         return newExp;
     },
-    deleteExpense: (id) => {
+
+    deleteExpense: async (id) => {
+        if (supabase) {
+            await supabase.from('expenses').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM expenses WHERE id = ?').run(id);
             return true;
@@ -546,15 +793,30 @@ const dbService = {
         return true;
     },
 
-    // CREDITORS / CUSTOMER DUES
-    getCreditors: () => {
+    // CREDITORS
+    getCreditors: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('creditors').select('*').order('id', { ascending: false });
+            return (data || []).map(c => ({ id: c.id, name: c.name, phone: c.phone || '', amount: Number(c.amount), type: c.type || 'receivable', lastUpdated: c.last_updated }));
+        }
         if (db) {
-            const rows = db.prepare('SELECT id, name, phone, amount, type, last_updated as lastUpdated FROM creditors ORDER BY id DESC').all();
-            return rows;
+            return db.prepare('SELECT id, name, phone, amount, type, last_updated as lastUpdated FROM creditors ORDER BY id DESC').all();
         }
         return [...jsonDb.data.creditors].reverse();
     },
-    createCreditor: (creditor) => {
+
+    createCreditor: async (creditor) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('creditors').insert([{
+                name: creditor.name,
+                phone: creditor.phone || '',
+                amount: Number(creditor.amount || 0),
+                type: creditor.type || 'receivable',
+                last_updated: creditor.lastUpdated || new Date().toISOString()
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return { id: data.id, name: data.name, phone: data.phone, amount: Number(data.amount), type: data.type, lastUpdated: data.last_updated };
+        }
         if (db) {
             const stmt = db.prepare('INSERT INTO creditors (name, phone, amount, type, last_updated) VALUES (?, ?, ?, ?, ?)');
             const res = stmt.run(creditor.name, creditor.phone || '', creditor.amount || 0, creditor.type || 'receivable', creditor.lastUpdated || new Date().toISOString());
@@ -566,7 +828,17 @@ const dbService = {
         jsonDb.save();
         return newCred;
     },
-    updateCreditor: (id, creditor) => {
+
+    updateCreditor: async (id, creditor) => {
+        if (supabase) {
+            const updatePayload = { last_updated: new Date().toISOString() };
+            if (creditor.name !== undefined) updatePayload.name = creditor.name;
+            if (creditor.phone !== undefined) updatePayload.phone = creditor.phone;
+            if (creditor.amount !== undefined) updatePayload.amount = Number(creditor.amount);
+            if (creditor.type !== undefined) updatePayload.type = creditor.type;
+            const { data } = await supabase.from('creditors').update(updatePayload).eq('id', id).select().single();
+            return { id: data.id, name: data.name, phone: data.phone, amount: Number(data.amount), type: data.type, lastUpdated: data.last_updated };
+        }
         if (db) {
             db.prepare('UPDATE creditors SET name = ?, phone = ?, amount = ?, type = ?, last_updated = ? WHERE id = ?')
                 .run(creditor.name, creditor.phone || '', creditor.amount, creditor.type, new Date().toISOString(), id);
@@ -580,7 +852,12 @@ const dbService = {
         }
         return null;
     },
-    deleteCreditor: (id) => {
+
+    deleteCreditor: async (id) => {
+        if (supabase) {
+            await supabase.from('creditors').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM creditors WHERE id = ?').run(id);
             return true;
@@ -591,13 +868,28 @@ const dbService = {
     },
 
     // BANK TRANSACTIONS
-    getBankTransactions: () => {
+    getBankTransactions: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('bank_transactions').select('*').order('id', { ascending: false });
+            return (data || []).map(b => ({ id: b.id, date: b.date, type: b.type, amount: Number(b.amount), note: b.note || '' }));
+        }
         if (db) {
             return db.prepare('SELECT * FROM bank_transactions ORDER BY id DESC').all();
         }
         return [...jsonDb.data.bank_transactions].reverse();
     },
-    createBankTransaction: (tx) => {
+
+    createBankTransaction: async (tx) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('bank_transactions').insert([{
+                date: tx.date || new Date().toISOString(),
+                type: tx.type,
+                amount: Number(tx.amount || 0),
+                note: tx.note || ''
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return { id: data.id, date: data.date, type: data.type, amount: Number(data.amount), note: data.note };
+        }
         if (db) {
             const stmt = db.prepare('INSERT INTO bank_transactions (date, type, amount, note) VALUES (?, ?, ?, ?)');
             const res = stmt.run(tx.date || new Date().toISOString(), tx.type, tx.amount, tx.note || '');
@@ -609,7 +901,12 @@ const dbService = {
         jsonDb.save();
         return newTx;
     },
-    deleteBankTransaction: (id) => {
+
+    deleteBankTransaction: async (id) => {
+        if (supabase) {
+            await supabase.from('bank_transactions').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM bank_transactions WHERE id = ?').run(id);
             return true;
@@ -620,16 +917,32 @@ const dbService = {
     },
 
     // SUPPLIERS
-    getSuppliers: () => {
+    getSuppliers: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('suppliers').select('*').order('id', { ascending: false });
+            return data || [];
+        }
         if (db) {
             return db.prepare('SELECT * FROM suppliers ORDER BY id DESC').all();
         }
         return [...jsonDb.data.suppliers].reverse();
     },
-    createSupplier: (supplier) => {
+
+    createSupplier: async (supplier) => {
+        if (supabase) {
+            const { data, error } = await supabase.from('suppliers').insert([{
+                name: supplier.name,
+                company: supplier.company || '',
+                phone: supplier.phone || '',
+                email: supplier.email || '',
+                address: supplier.address || ''
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return data;
+        }
         if (db) {
-            const stmt = db.prepare('INSERT INTO suppliers (name, company, phone, address) VALUES (?, ?, ?, ?)');
-            const res = stmt.run(supplier.name, supplier.company || '', supplier.phone || '', supplier.address || '');
+            const stmt = db.prepare('INSERT INTO suppliers (name, company, phone, email, address) VALUES (?, ?, ?, ?, ?)');
+            const res = stmt.run(supplier.name, supplier.company || '', supplier.phone || '', supplier.email || '', supplier.address || '');
             return { id: Number(res.lastInsertRowid), ...supplier };
         }
         const newId = jsonDb.data.suppliers.length ? Math.max(...jsonDb.data.suppliers.map(s => s.id)) + 1 : 1;
@@ -638,7 +951,12 @@ const dbService = {
         jsonDb.save();
         return newSup;
     },
-    deleteSupplier: (id) => {
+
+    deleteSupplier: async (id) => {
+        if (supabase) {
+            await supabase.from('suppliers').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM suppliers WHERE id = ?').run(id);
             return true;
@@ -649,55 +967,83 @@ const dbService = {
     },
 
     // PURCHASE BILLS
-    getPurchaseBills: () => {
-        if (db) {
-            const rows = db.prepare('SELECT id, supplier_id as supplierId, supplier_name as supplierName, date, total, status, items_json as itemsJson FROM purchase_bills ORDER BY id DESC').all();
-            return rows.map(r => ({ ...r, items: JSON.parse(r.itemsJson || '[]') }));
+    getPurchaseBills: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('purchase_bills').select('*').order('id', { ascending: false });
+            return (data || []).map(formatPurchaseBill);
         }
-        return [...jsonDb.data.purchase_bills].reverse();
-    },
-    createPurchaseBill: (bill) => {
-        const itemsJson = JSON.stringify(bill.items || []);
         if (db) {
-            const stmt = db.prepare('INSERT INTO purchase_bills (supplier_id, supplier_name, date, total, status, items_json) VALUES (?, ?, ?, ?, ?, ?)');
-            const res = stmt.run(bill.supplierId || null, bill.supplierName || '', bill.date || new Date().toISOString(), bill.total || 0, bill.status || 'pending', itemsJson);
+            const rows = db.prepare('SELECT * FROM purchase_bills ORDER BY id DESC').all();
+            return rows.map(formatPurchaseBill);
+        }
+        return [...jsonDb.data.purchase_bills].reverse().map(formatPurchaseBill);
+    },
+
+    createPurchaseBill: async (bill) => {
+        const itemsJson = bill.items || [];
+        if (supabase) {
+            const { data, error } = await supabase.from('purchase_bills').insert([{
+                supplier_id: bill.supplierId || null,
+                supplier_name: bill.supplierName || '',
+                bill_number: bill.billNumber || '',
+                date: bill.date || new Date().toISOString(),
+                total_amount: Number(bill.totalAmount || 0),
+                status: bill.status || 'pending',
+                items_json: itemsJson
+            }]).select().single();
+            if (error) throw new Error(error.message);
+            return formatPurchaseBill(data);
+        }
+        if (db) {
+            const stmt = db.prepare(`
+                INSERT INTO purchase_bills (supplier_id, supplier_name, bill_number, date, total_amount, status, items_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `);
+            const res = stmt.run(
+                bill.supplierId || null,
+                bill.supplierName || '',
+                bill.billNumber || '',
+                bill.date || new Date().toISOString(),
+                bill.totalAmount || 0,
+                bill.status || 'pending',
+                JSON.stringify(itemsJson)
+            );
             return { id: Number(res.lastInsertRowid), ...bill };
         }
         const newId = jsonDb.data.purchase_bills.length ? Math.max(...jsonDb.data.purchase_bills.map(p => p.id)) + 1 : 1;
         const newBill = { id: newId, ...bill };
         jsonDb.data.purchase_bills.push(newBill);
         jsonDb.save();
-        return newBill;
+        return formatPurchaseBill(newBill);
     },
-    updatePurchaseBill: (id, bill) => {
-        const itemsJson = bill.items ? JSON.stringify(bill.items) : undefined;
+
+    updatePurchaseBill: async (id, bill) => {
+        if (supabase) {
+            const updatePayload = {};
+            if (bill.status !== undefined) updatePayload.status = bill.status;
+            if (bill.totalAmount !== undefined) updatePayload.total_amount = Number(bill.totalAmount);
+            const { data } = await supabase.from('purchase_bills').update(updatePayload).eq('id', id).select().single();
+            return formatPurchaseBill(data);
+        }
         if (db) {
-            const existing = db.prepare('SELECT * FROM purchase_bills WHERE id = ?').get(id);
-            if (!existing) return null;
-            const updatedSupplierId = bill.supplierId !== undefined ? bill.supplierId : existing.supplier_id;
-            const updatedSupplierName = bill.supplierName !== undefined ? bill.supplierName : existing.supplier_name;
-            const updatedDate = bill.date !== undefined ? bill.date : existing.date;
-            const updatedTotal = bill.total !== undefined ? bill.total : existing.total;
-            const updatedStatus = bill.status !== undefined ? bill.status : existing.status;
-            const updatedItemsJson = itemsJson !== undefined ? itemsJson : existing.items_json;
-
-            db.prepare(`
-                UPDATE purchase_bills 
-                SET supplier_id = ?, supplier_name = ?, date = ?, total = ?, status = ?, items_json = ?
-                WHERE id = ?
-            `).run(updatedSupplierId, updatedSupplierName, updatedDate, updatedTotal, updatedStatus, updatedItemsJson, id);
-
-            return { id: Number(id), supplierId: updatedSupplierId, supplierName: updatedSupplierName, date: updatedDate, total: updatedTotal, status: updatedStatus, items: JSON.parse(updatedItemsJson || '[]') };
+            db.prepare('UPDATE purchase_bills SET status = COALESCE(?, status), total_amount = COALESCE(?, total_amount) WHERE id = ?')
+                .run(bill.status || null, bill.totalAmount || null, id);
+            return { id: Number(id), ...bill };
         }
         const idx = jsonDb.data.purchase_bills.findIndex(p => p.id === Number(id));
         if (idx !== -1) {
             jsonDb.data.purchase_bills[idx] = { ...jsonDb.data.purchase_bills[idx], ...bill };
             jsonDb.save();
-            return jsonDb.data.purchase_bills[idx];
+            return formatPurchaseBill(jsonDb.data.purchase_bills[idx]);
         }
         return null;
     },
-    deletePurchaseBill: (id) => {
+
+    deletePurchaseBill: async (id) => {
+        if (supabase) {
+            await supabase.from('purchase_bills').delete().eq('id', id);
+            return true;
+        }
         if (db) {
             db.prepare('DELETE FROM purchase_bills WHERE id = ?').run(id);
             return true;
@@ -708,7 +1054,13 @@ const dbService = {
     },
 
     // SETTINGS
-    getSettings: () => {
+    getSettings: async () => {
+        if (supabase) {
+            const { data } = await supabase.from('settings').select('*');
+            const obj = {};
+            for (const r of (data || [])) obj[r.key] = r.value;
+            return obj;
+        }
         if (db) {
             const rows = db.prepare('SELECT * FROM settings').all();
             const obj = {};
@@ -717,7 +1069,12 @@ const dbService = {
         }
         return jsonDb.data.settings;
     },
-    setSetting: (key, value) => {
+
+    setSetting: async (key, value) => {
+        if (supabase) {
+            await supabase.from('settings').upsert({ key, value: String(value) });
+            return true;
+        }
         if (db) {
             db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
             return true;
@@ -728,24 +1085,23 @@ const dbService = {
     },
 
     // EXPORT ALL DATA
-    exportAllData: () => {
+    exportAllData: async () => {
         return {
-            users: dbService.getUsers(),
-            items: dbService.getItems(),
-            repairs: dbService.getRepairs(),
-            sales: dbService.getSales(),
-            expenses: dbService.getExpenses(),
-            creditors: dbService.getCreditors(),
-            bankTransactions: dbService.getBankTransactions(),
-            suppliers: dbService.getSuppliers(),
-            purchaseBills: dbService.getPurchaseBills(),
-            settings: dbService.getSettings(),
+            users: await dbService.getUsers(),
+            items: await dbService.getItems(),
+            repairs: await dbService.getRepairs(),
+            sales: await dbService.getSales(),
+            expenses: await dbService.getExpenses(),
+            creditors: await dbService.getCreditors(),
+            bankTransactions: await dbService.getBankTransactions(),
+            suppliers: await dbService.getSuppliers(),
+            purchaseBills: await dbService.getPurchaseBills(),
+            settings: await dbService.getSettings(),
             exportTimestamp: new Date().toISOString()
         };
     }
 };
 
-// Run table creation on start
 initDatabase();
 
 module.exports = { dbService };

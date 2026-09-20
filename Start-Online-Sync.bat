@@ -1,9 +1,9 @@
 @echo off
-title Krishan POS - Free 24/7 Online Multi-Device Sync
+title Krishan POS - Free Realtime Multi-Device Sync
 color 0b
 echo ========================================================
-echo   KRISHAN POS - FREE INTERNET & MULTI-DEVICE SYNC
-echo   (No Credit Cards - 100%% Free Forever)
+echo   KRISHAN POS - 100%% FREE MULTI-DEVICE REALTIME SYNC
+echo   (No Credit Cards - Zero Monthly Cost)
 echo ========================================================
 echo.
 
@@ -15,17 +15,14 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
-echo [1/2] Starting Krishan POS Local Server...
-start "Krishan POS Server" cmd /k "node server.js"
-timeout /t 3 >nul
+echo [1/3] Starting Local Backend Server...
+start "Krishan POS Server" /min cmd /c "node server.js"
+timeout /t 2 >nul
 
-echo [2/2] Creating Free 100%% Free Online HTTPS Internet Link...
-echo.
-echo ========================================================
-echo  Your Free Public Internet Link will appear below:
-echo  (Copy and open this link on your Mobile Phone or Laptop)
-echo ========================================================
-echo.
+echo [2/3] Opening POS on this Computer...
+start http://localhost:3000
 
-call npx.cmd -y localtunnel --port 3000 --subdomain krishan-pos-%RANDOM%
+echo [3/3] Starting Online Multi-Device Sync Engine...
+echo.
+node start-sync.js
 pause

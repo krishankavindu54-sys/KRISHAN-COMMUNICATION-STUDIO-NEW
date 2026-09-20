@@ -1,10 +1,10 @@
 const express = require('express');
+const http = require('http');
+const path = require('path');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const path = require('path');
-const http = require('http');
 const { Server } = require('socket.io');
 require('dotenv').config();
 
@@ -12,81 +12,58 @@ const { dbService } = require('./database');
 
 const app = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'krishan-pos-jwt-super-secret-key-2026';
-const SESSION_DURATION = 12 * 60 * 60 * 1000; // 12 hours
 
-// Socket.io Realtime Setup
-const io = new Server(server, {
-    cors: {
-        origin: '*',
-        methods: ['GET', 'POST', 'PUT', 'DELETE'],
-        credentials: true
-    },
-    pingTimeout: 20000,
-    pingInterval: 10000
-});
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT);
 
-let connectedClients = 0;
-
-io.on('connection', (socket) => {
-    connectedClients++;
-    console.log(`⚡ [Realtime] Device connected: ${socket.id} (Online devices: ${connectedClients})`);
-
-    // Send connection acknowledgement & initial stats
-    socket.emit('sync:welcome', {
-        serverTime: new Date().toISOString(),
-        deviceCount: connectedClients,
-        socketId: socket.id
-    });
-
-    // Broadcast updated device count to all connected clients
-    io.emit('sync:device_count', { count: connectedClients });
-
-    // Handle full snapshot request
-    socket.on('sync:request_full', (callback) => {
-        try {
-            const data = dbService.exportAllData();
-            if (typeof callback === 'function') {
-                callback({ success: true, data });
-            } else {
-                socket.emit('sync:full_snapshot', data);
-            }
-        } catch (err) {
-            console.error('Error serving full snapshot:', err);
-            if (typeof callback === 'function') callback({ success: false, error: err.message });
+// Setup Socket.io for persistent connections (Local / VPS / Render)
+let io;
+if (!isServerless) {
+    io = new Server(server, {
+        cors: {
+            origin: true,
+            credentials: true
         }
     });
 
-    // Handle latency ping
-    socket.on('sync:ping', (data, callback) => {
-        if (typeof callback === 'function') {
-            callback({ serverTime: Date.now() });
-        }
-    });
+    let connectedClients = 0;
 
-    socket.on('disconnect', () => {
-        connectedClients = Math.max(0, connectedClients - 1);
-        console.log(`🔌 [Realtime] Device disconnected: ${socket.id} (Online devices: ${connectedClients})`);
+    io.on('connection', (socket) => {
+        connectedClients++;
+        console.log(`⚡ [Socket.io] Client connected (ID: ${socket.id}). Total active devices: ${connectedClients}`);
+
+        socket.emit('sync:welcome', {
+            deviceCount: connectedClients,
+            timestamp: new Date().toISOString(),
+            serverTime: Date.now()
+        });
+
         io.emit('sync:device_count', { count: connectedClients });
-    });
-});
 
-// Realtime Broadcast Helper
-function broadcastSync(type, data, originSocketId = null) {
+        socket.on('disconnect', () => {
+            connectedClients = Math.max(0, connectedClients - 1);
+            console.log(`🔌 [Socket.io] Client disconnected (ID: ${socket.id}). Remaining: ${connectedClients}`);
+            io.emit('sync:device_count', { count: connectedClients });
+        });
+    });
+}
+
+function broadcastSync(type, data, excludeSocketId = null) {
+    if (!io) return;
     const payload = {
         type,
         data,
-        timestamp: new Date().toISOString(),
-        origin: originSocketId
+        timestamp: new Date().toISOString()
     };
-
-    if (originSocketId) {
-        io.except(originSocketId).emit('sync:event', payload);
+    if (excludeSocketId) {
+        io.except(excludeSocketId).emit('sync:event', payload);
     } else {
         io.emit('sync:event', payload);
     }
 }
+
+const JWT_SECRET = process.env.JWT_SECRET || 'krishan_pos_secure_studio_jwt_secret_2026';
+const SESSION_DURATION = 12 * 60 * 60 * 1000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
@@ -131,7 +108,6 @@ function requireAdmin(req, res, next) {
     next();
 }
 
-// Helper to get socket origin header
 function getSocketId(req) {
     return req.headers['x-socket-id'] || null;
 }
@@ -147,7 +123,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Username and password are required.' });
         }
 
-        const user = dbService.getUserByUsername(username.trim());
+        const user = await dbService.getUserByUsername(username.trim());
         if (!user) {
             return res.status(401).json({ success: false, message: 'Invalid username or password.' });
         }
@@ -200,7 +176,7 @@ app.post('/api/auth/change-password', requireAuth, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Password must be at least 4 characters.' });
         }
 
-        const user = dbService.getUserByUsername(req.user.username);
+        const user = await dbService.getUserByUsername(req.user.username);
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found.' });
         }
@@ -210,7 +186,7 @@ app.post('/api/auth/change-password', requireAuth, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Current password is incorrect.' });
         }
 
-        dbService.updateUser(user.id, { password: newPassword });
+        await dbService.updateUser(user.id, { password: newPassword });
         res.json({ success: true, message: 'Password updated successfully.' });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Error updating password.' });
@@ -221,38 +197,38 @@ app.post('/api/auth/change-password', requireAuth, async (req, res) => {
 // USER MANAGEMENT (Admin Only)
 // ──────────────────────────────────────────────
 
-app.get('/api/users', requireAdmin, (req, res) => {
+app.get('/api/users', requireAdmin, async (req, res) => {
     try {
-        const users = dbService.getUsers();
+        const users = await dbService.getUsers();
         res.json({ success: true, users });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
 });
 
-app.post('/api/users', requireAdmin, (req, res) => {
+app.post('/api/users', requireAdmin, async (req, res) => {
     try {
         const { username, password, role, name } = req.body;
         if (!username || !password || !name) {
             return res.status(400).json({ success: false, message: 'Username, password, and name are required.' });
         }
 
-        const existing = dbService.getUserByUsername(username);
+        const existing = await dbService.getUserByUsername(username);
         if (existing) {
             return res.status(400).json({ success: false, message: 'Username already exists.' });
         }
 
-        const newUser = dbService.createUser({ username, password, role: role || 'cashier', name });
+        const newUser = await dbService.createUser({ username, password, role: role || 'cashier', name });
         res.json({ success: true, user: newUser });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
 });
 
-app.put('/api/users/:id', requireAdmin, (req, res) => {
+app.put('/api/users/:id', requireAdmin, async (req, res) => {
     try {
         const { name, role, password } = req.body;
-        const updated = dbService.updateUser(req.params.id, { name, role, password });
+        const updated = await dbService.updateUser(req.params.id, { name, role, password });
         if (!updated) return res.status(404).json({ success: false, message: 'User not found.' });
         res.json({ success: true, user: updated });
     } catch (e) {
@@ -260,13 +236,13 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
     }
 });
 
-app.delete('/api/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/users/:id', requireAdmin, async (req, res) => {
     try {
         const userId = Number(req.params.id);
         if (req.user.id === userId) {
             return res.status(400).json({ success: false, message: 'You cannot delete your own account.' });
         }
-        dbService.deleteUser(userId);
+        await dbService.deleteUser(userId);
         res.json({ success: true, message: 'User deleted.' });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -278,213 +254,350 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
 // ──────────────────────────────────────────────
 
 // Items / Inventory
-app.get('/api/items', requireAuth, (req, res) => {
-    res.json(dbService.getItems());
+app.get('/api/items', requireAuth, async (req, res) => {
+    try {
+        const items = await dbService.getItems();
+        res.json(items);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/items', requireAuth, (req, res) => {
-    const item = dbService.createItem(req.body);
-    broadcastSync('ITEM_CREATED', item, getSocketId(req));
-    res.json(item);
+app.post('/api/items', requireAuth, async (req, res) => {
+    try {
+        const item = await dbService.createItem(req.body);
+        broadcastSync('ITEM_CREATED', item, getSocketId(req));
+        res.json(item);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.put('/api/items/:id', requireAuth, (req, res) => {
-    const item = dbService.updateItem(req.params.id, req.body);
-    if (!item) return res.status(404).json({ message: 'Item not found' });
-    broadcastSync('ITEM_UPDATED', item, getSocketId(req));
-    res.json(item);
+app.put('/api/items/:id', requireAuth, async (req, res) => {
+    try {
+        const item = await dbService.updateItem(req.params.id, req.body);
+        if (!item) return res.status(404).json({ message: 'Item not found' });
+        broadcastSync('ITEM_UPDATED', item, getSocketId(req));
+        res.json(item);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/items/:id/adjust-stock', requireAuth, (req, res) => {
-    const delta = Number(req.body.delta) || 0;
-    const item = dbService.adjustItemStock(req.params.id, delta);
-    if (!item) return res.status(404).json({ message: 'Item not found' });
-    broadcastSync('STOCK_CHANGED', { id: Number(req.params.id), stock: item.stock, delta, item }, getSocketId(req));
-    res.json(item);
+app.post('/api/items/:id/adjust-stock', requireAuth, async (req, res) => {
+    try {
+        const delta = Number(req.body.delta) || 0;
+        const item = await dbService.adjustItemStock(req.params.id, delta);
+        if (!item) return res.status(404).json({ message: 'Item not found' });
+        broadcastSync('STOCK_CHANGED', { id: Number(req.params.id), stock: item.stock, delta, item }, getSocketId(req));
+        res.json(item);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/items/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteItem(id);
-    broadcastSync('ITEM_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/items/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteItem(id);
+        broadcastSync('ITEM_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Sales
-app.get('/api/sales', requireAuth, (req, res) => {
-    res.json(dbService.getSales());
+app.get('/api/sales', requireAuth, async (req, res) => {
+    try {
+        const sales = await dbService.getSales();
+        res.json(sales);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/sales', requireAuth, (req, res) => {
-    const saleData = { ...req.body, userId: req.user.id };
-    const sale = dbService.createSale(saleData);
-    
-    // Broadcast sale created along with affected fresh items stock
-    broadcastSync('SALE_CREATED', {
-        sale,
-        items: dbService.getItems(),
-        cashier: req.user.name || req.user.username
-    }, getSocketId(req));
-    
-    res.json(sale);
+app.post('/api/sales', requireAuth, async (req, res) => {
+    try {
+        const saleData = { ...req.body, userId: req.user.id };
+        const sale = await dbService.createSale(saleData);
+        const allItems = await dbService.getItems();
+        
+        broadcastSync('SALE_CREATED', {
+            sale,
+            items: allItems,
+            cashier: req.user.name || req.user.username
+        }, getSocketId(req));
+        
+        res.json(sale);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/sales/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteSale(id);
-    broadcastSync('SALE_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/sales/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteSale(id);
+        broadcastSync('SALE_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Repairs
-app.get('/api/repairs', requireAuth, (req, res) => {
-    res.json(dbService.getRepairs());
+app.get('/api/repairs', requireAuth, async (req, res) => {
+    try {
+        const repairs = await dbService.getRepairs();
+        res.json(repairs);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/repairs', requireAuth, (req, res) => {
-    const repair = dbService.createRepair(req.body);
-    broadcastSync('REPAIR_CREATED', repair, getSocketId(req));
-    res.json(repair);
+app.post('/api/repairs', requireAuth, async (req, res) => {
+    try {
+        const repair = await dbService.createRepair(req.body);
+        broadcastSync('REPAIR_CREATED', repair, getSocketId(req));
+        res.json(repair);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.put('/api/repairs/:id', requireAuth, (req, res) => {
-    const repair = dbService.updateRepair(req.params.id, req.body);
-    if (!repair) return res.status(404).json({ message: 'Repair not found' });
-    broadcastSync('REPAIR_UPDATED', repair, getSocketId(req));
-    res.json(repair);
+app.put('/api/repairs/:id', requireAuth, async (req, res) => {
+    try {
+        const repair = await dbService.updateRepair(req.params.id, req.body);
+        if (!repair) return res.status(404).json({ message: 'Repair not found' });
+        broadcastSync('REPAIR_UPDATED', repair, getSocketId(req));
+        res.json(repair);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/repairs/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteRepair(id);
-    broadcastSync('REPAIR_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/repairs/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteRepair(id);
+        broadcastSync('REPAIR_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Expenses
-app.get('/api/expenses', requireAuth, (req, res) => {
-    res.json(dbService.getExpenses());
+app.get('/api/expenses', requireAuth, async (req, res) => {
+    try {
+        const expenses = await dbService.getExpenses();
+        res.json(expenses);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/expenses', requireAuth, (req, res) => {
-    const expense = dbService.createExpense(req.body);
-    broadcastSync('EXPENSE_CREATED', expense, getSocketId(req));
-    res.json(expense);
+app.post('/api/expenses', requireAuth, async (req, res) => {
+    try {
+        const expense = await dbService.createExpense(req.body);
+        broadcastSync('EXPENSE_CREATED', expense, getSocketId(req));
+        res.json(expense);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/expenses/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteExpense(id);
-    broadcastSync('EXPENSE_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/expenses/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteExpense(id);
+        broadcastSync('EXPENSE_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-// Creditors / Credit Book
-app.get('/api/creditors', requireAuth, (req, res) => {
-    res.json(dbService.getCreditors());
+// Creditors
+app.get('/api/creditors', requireAuth, async (req, res) => {
+    try {
+        const creditors = await dbService.getCreditors();
+        res.json(creditors);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/creditors', requireAuth, (req, res) => {
-    const creditor = dbService.createCreditor(req.body);
-    broadcastSync('CREDITOR_CREATED', creditor, getSocketId(req));
-    res.json(creditor);
+app.post('/api/creditors', requireAuth, async (req, res) => {
+    try {
+        const creditor = await dbService.createCreditor(req.body);
+        broadcastSync('CREDITOR_CREATED', creditor, getSocketId(req));
+        res.json(creditor);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.put('/api/creditors/:id', requireAuth, (req, res) => {
-    const creditor = dbService.updateCreditor(req.params.id, req.body);
-    if (!creditor) return res.status(404).json({ message: 'Creditor not found' });
-    broadcastSync('CREDITOR_UPDATED', creditor, getSocketId(req));
-    res.json(creditor);
+app.put('/api/creditors/:id', requireAuth, async (req, res) => {
+    try {
+        const creditor = await dbService.updateCreditor(req.params.id, req.body);
+        if (!creditor) return res.status(404).json({ message: 'Creditor not found' });
+        broadcastSync('CREDITOR_UPDATED', creditor, getSocketId(req));
+        res.json(creditor);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/creditors/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteCreditor(id);
-    broadcastSync('CREDITOR_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/creditors/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteCreditor(id);
+        broadcastSync('CREDITOR_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Bank Transactions
-app.get('/api/bank-transactions', requireAuth, (req, res) => {
-    res.json(dbService.getBankTransactions());
+app.get('/api/bank-transactions', requireAuth, async (req, res) => {
+    try {
+        const txs = await dbService.getBankTransactions();
+        res.json(txs);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/bank-transactions', requireAuth, (req, res) => {
-    const tx = dbService.createBankTransaction(req.body);
-    broadcastSync('BANK_TX_CREATED', tx, getSocketId(req));
-    res.json(tx);
+app.post('/api/bank-transactions', requireAuth, async (req, res) => {
+    try {
+        const tx = await dbService.createBankTransaction(req.body);
+        broadcastSync('BANK_TX_CREATED', tx, getSocketId(req));
+        res.json(tx);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/bank-transactions/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteBankTransaction(id);
-    broadcastSync('BANK_TX_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/bank-transactions/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteBankTransaction(id);
+        broadcastSync('BANK_TX_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Suppliers
-app.get('/api/suppliers', requireAuth, (req, res) => {
-    res.json(dbService.getSuppliers());
+app.get('/api/suppliers', requireAuth, async (req, res) => {
+    try {
+        const suppliers = await dbService.getSuppliers();
+        res.json(suppliers);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/suppliers', requireAuth, (req, res) => {
-    const supplier = dbService.createSupplier(req.body);
-    broadcastSync('SUPPLIER_CREATED', supplier, getSocketId(req));
-    res.json(supplier);
+app.post('/api/suppliers', requireAuth, async (req, res) => {
+    try {
+        const supplier = await dbService.createSupplier(req.body);
+        broadcastSync('SUPPLIER_CREATED', supplier, getSocketId(req));
+        res.json(supplier);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/suppliers/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deleteSupplier(id);
-    broadcastSync('SUPPLIER_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/suppliers/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deleteSupplier(id);
+        broadcastSync('SUPPLIER_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Purchase Bills
-app.get('/api/purchase-bills', requireAuth, (req, res) => {
-    res.json(dbService.getPurchaseBills());
+app.get('/api/purchase-bills', requireAuth, async (req, res) => {
+    try {
+        const bills = await dbService.getPurchaseBills();
+        res.json(bills);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/purchase-bills', requireAuth, (req, res) => {
-    const bill = dbService.createPurchaseBill(req.body);
-    broadcastSync('BILL_CREATED', bill, getSocketId(req));
-    res.json(bill);
+app.post('/api/purchase-bills', requireAuth, async (req, res) => {
+    try {
+        const bill = await dbService.createPurchaseBill(req.body);
+        broadcastSync('BILL_CREATED', bill, getSocketId(req));
+        res.json(bill);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.put('/api/purchase-bills/:id', requireAuth, (req, res) => {
-    const bill = dbService.updatePurchaseBill(req.params.id, req.body);
-    if (!bill) return res.status(404).json({ message: 'Purchase bill not found' });
-    broadcastSync('BILL_UPDATED', bill, getSocketId(req));
-    res.json(bill);
+app.put('/api/purchase-bills/:id', requireAuth, async (req, res) => {
+    try {
+        const bill = await dbService.updatePurchaseBill(req.params.id, req.body);
+        if (!bill) return res.status(404).json({ message: 'Purchase bill not found' });
+        broadcastSync('BILL_UPDATED', bill, getSocketId(req));
+        res.json(bill);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.delete('/api/purchase-bills/:id', requireAuth, (req, res) => {
-    const id = Number(req.params.id);
-    dbService.deletePurchaseBill(id);
-    broadcastSync('BILL_DELETED', { id }, getSocketId(req));
-    res.json({ success: true });
+app.delete('/api/purchase-bills/:id', requireAuth, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        await dbService.deletePurchaseBill(id);
+        broadcastSync('BILL_DELETED', { id }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Settings
-app.get('/api/settings', (req, res) => {
-    res.json(dbService.getSettings());
+app.get('/api/settings', async (req, res) => {
+    try {
+        const settings = await dbService.getSettings();
+        res.json(settings);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
-app.post('/api/settings', requireAuth, (req, res) => {
-    const { key, value } = req.body;
-    dbService.setSetting(key, value);
-    broadcastSync('SETTINGS_UPDATED', { key, value }, getSocketId(req));
-    res.json({ success: true });
+app.post('/api/settings', requireAuth, async (req, res) => {
+    try {
+        const { key, value } = req.body;
+        await dbService.setSetting(key, value);
+        broadcastSync('SETTINGS_UPDATED', { key, value }, getSocketId(req));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
 });
 
 // Full Sync & Diagnostics
-app.get('/api/sync/full', requireAuth, (req, res) => {
-    const data = dbService.exportAllData();
-    res.json({ success: true, data, timestamp: new Date().toISOString() });
+app.get('/api/sync/full', requireAuth, async (req, res) => {
+    try {
+        const data = await dbService.exportAllData();
+        res.json({ success: true, data, timestamp: new Date().toISOString() });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 // Batch Sync (Offline Queue Processor)
-app.post('/api/sync/batch', requireAuth, (req, res) => {
+app.post('/api/sync/batch', requireAuth, async (req, res) => {
     try {
         const { operations } = req.body || {};
         if (!Array.isArray(operations) || operations.length === 0) {
@@ -496,34 +609,34 @@ app.post('/api/sync/batch', requireAuth, (req, res) => {
             try {
                 switch (op.type) {
                     case 'create_item':
-                        results.push({ opId: op.id, result: dbService.createItem(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createItem(op.payload) });
                         break;
                     case 'update_item':
-                        results.push({ opId: op.id, result: dbService.updateItem(op.targetId, op.payload) });
+                        results.push({ opId: op.id, result: await dbService.updateItem(op.targetId, op.payload) });
                         break;
                     case 'create_sale':
-                        results.push({ opId: op.id, result: dbService.createSale({ ...op.payload, userId: req.user.id }) });
+                        results.push({ opId: op.id, result: await dbService.createSale({ ...op.payload, userId: req.user.id }) });
                         break;
                     case 'create_repair':
-                        results.push({ opId: op.id, result: dbService.createRepair(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createRepair(op.payload) });
                         break;
                     case 'update_repair':
-                        results.push({ opId: op.id, result: dbService.updateRepair(op.targetId, op.payload) });
+                        results.push({ opId: op.id, result: await dbService.updateRepair(op.targetId, op.payload) });
                         break;
                     case 'create_expense':
-                        results.push({ opId: op.id, result: dbService.createExpense(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createExpense(op.payload) });
                         break;
                     case 'create_creditor':
-                        results.push({ opId: op.id, result: dbService.createCreditor(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createCreditor(op.payload) });
                         break;
                     case 'update_creditor':
-                        results.push({ opId: op.id, result: dbService.updateCreditor(op.targetId, op.payload) });
+                        results.push({ opId: op.id, result: await dbService.updateCreditor(op.targetId, op.payload) });
                         break;
                     case 'create_bank_tx':
-                        results.push({ opId: op.id, result: dbService.createBankTransaction(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createBankTransaction(op.payload) });
                         break;
                     case 'create_bill':
-                        results.push({ opId: op.id, result: dbService.createPurchaseBill(op.payload) });
+                        results.push({ opId: op.id, result: await dbService.createPurchaseBill(op.payload) });
                         break;
                     default:
                         break;
@@ -534,7 +647,6 @@ app.post('/api/sync/batch', requireAuth, (req, res) => {
             }
         }
 
-        // Broadcast full update after batch
         broadcastSync('BATCH_SYNC_COMPLETED', { timestamp: new Date().toISOString() }, getSocketId(req));
 
         res.json({ success: true, processed: results.length, results });
@@ -545,11 +657,15 @@ app.post('/api/sync/batch', requireAuth, (req, res) => {
 });
 
 // Export Backup
-app.get('/api/backup/export', requireAuth, (req, res) => {
-    const data = dbService.exportAllData();
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename=pos_backup_${Date.now()}.json`);
-    res.send(JSON.stringify(data, null, 2));
+app.get('/api/backup/export', requireAuth, async (req, res) => {
+    try {
+        const data = await dbService.exportAllData();
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', `attachment; filename=pos_backup_${Date.now()}.json`);
+        res.send(JSON.stringify(data, null, 2));
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
 // Front-end Page routing
@@ -593,15 +709,4 @@ if (!process.env.VERCEL) {
         console.log(`🔑 Default Admin:  admin / admin123`);
         console.log(`=========================================`);
     });
-
-    // Attempt direct port 80 helper (if running as admin)
-    if (Number(PORT) !== 80) {
-        const http80 = require('http');
-        const server80 = http80.createServer(app);
-        server80.listen(80, '0.0.0.0', () => {
-            console.log(`✨ Direct Port 80 active (Visit http://${localIP})`);
-        }).on('error', () => {
-            // Port 80 busy/forbidden, port 3000 remains active
-        });
-    }
 }
